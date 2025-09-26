@@ -72,7 +72,7 @@ Sub GenerateAllRICs()
             .Cells(i, 5).Value = ricDict("MonthCode")
             .Cells(i, 6).Value = ricDict("YearCode")
             ' Add RData formula to check if RIC exists
-            .Cells(i, 7).Formula = "=@TR(A" & i & ",""EXPIR_DATE"")"
+            .Cells(i, 7).Formula = "=@TR(A" & i & ",""UNDERLYING"")"
             ' Initialize Processed column as "No" or empty
             .Cells(i, 8).Value = "No"
         End With
@@ -476,7 +476,7 @@ Sub DownloadFromChain()
     Application.Wait Now + TimeValue("00:00:05")
 
     ' Check if data was downloaded
-    If IsEmpty(chainSheet.Range("B2").Value) Or chainSheet.Range("B2").Value = "0" Then
+    If IsEmpty(chainSheet.Range("B3").Value) Or chainSheet.Range("B3").Value = "0" Then
         chainSheet.Range("C2").Value = "No data"
         MsgBox "No option chain data found for " & rootRIC & ". Please check if the root RIC is correct.", vbExclamation
         Application.StatusBar = False
@@ -535,8 +535,12 @@ Sub ProcessChainData(chainSheet As Worksheet)
     Dim i As Long
     Dim chainRICCode As String
     Dim cleanChainRIC As String
+    Dim chainIndex As Long
+    Dim optionColumn As Long
+    Dim stepSize As Long
 
     Application.StatusBar = "Processing chain data..."
+    stepSize = 7
 
     ' Setup RIC_List sheet
     Set ricListSheet = SetupRICListSheetForChain()
@@ -545,11 +549,14 @@ Sub ProcessChainData(chainSheet As Worksheet)
     lastRow = chainSheet.Cells(chainSheet.Rows.count, "B").End(xlUp).Row
 
     ' Setup headers for Stage 2 processing
-    chainSheet.Range("D1").Value = "Chain RIC"
-    chainSheet.Range("E1").Value = "Option List"
+    chainSheet.Range("D1").Value = "Chain Index"
+    chainSheet.Range("E1").Value = "Clean Chain RIC"
+    chainSheet.Range("F1").Value = "Option Column"
+
+    chainIndex = 0  ' Track chain processing order
 
     ' Stage 1: Process each chain RIC from the chain-of-chains download
-    For i = 2 To lastRow  ' Start from row 2 (skip header)
+    For i = 3 To lastRow  ' Start from row 3 (skip header and first returned)
         ' Get the chain RIC from the first download
         chainRICCode = Trim(CStr(chainSheet.Cells(i, 2).Value))
 
@@ -563,23 +570,38 @@ Sub ProcessChainData(chainSheet As Worksheet)
             cleanChainRIC = chainRICCode
         End If
 
-        ' Store clean chain RIC for reference
-        chainSheet.Cells(i, 4).Value = cleanChainRIC
+        ' Calculate option column (start from column G = 7)
+        optionColumn = 7 + chainIndex * stepSize
+
+        ' Store chain processing information
+        'chainSheet.Cells(i, 4).Value = chainIndex  ' Chain Index
+        'chainSheet.Cells(i, 5).Value = cleanChainRIC  ' Clean Chain RIC
+        'chainSheet.Cells(i, 6).Value = optionColumn  ' Option Column
+
+        ' Add column header for this chain's options
+        chainSheet.Cells(1, optionColumn).Value = "Chain " & chainIndex & " (" & cleanChainRIC & ")"
 
         ' Stage 2: Download individual options from this chain RIC
-        Application.StatusBar = "Downloading options from chain: " & cleanChainRIC
-        DownloadOptionsFromSingleChain chainSheet, i, cleanChainRIC
+        Application.StatusBar = "Downloading options from chain " & chainIndex & ": " & cleanChainRIC
+        DownloadOptionsFromSingleChain chainSheet, optionColumn, cleanChainRIC
+
+        chainIndex = chainIndex + 1
 
 NextChainRIC:
     Next i
+    
+    ' Call Worksheet refresh
+    DoEvents
+    Application.Run "WorkspaceRefreshWorksheet", True, 120000, chainSheet.Name
+    DoEvents
 
     ' Wait for all TR formulas to refresh
     Application.StatusBar = "Waiting for data refresh..."
-    Application.Wait Now + TimeValue("00:00:15")
+    Application.Wait Now + TimeValue("00:00:05")
 
     ' Stage 3: Process all downloaded option data and copy to RIC_List
     Application.StatusBar = "Processing option data..."
-    ProcessAllOptionData chainSheet, ricListSheet
+    ProcessAllOptionDataByColumns chainSheet, ricListSheet, chainIndex, stepSize
 
     Application.StatusBar = False
 End Sub
@@ -588,14 +610,15 @@ End Sub
 ' DOWNLOAD OPTIONS FROM SINGLE CHAIN
 ' ============================================
 
-Sub DownloadOptionsFromSingleChain(chainSheet As Worksheet, chainRow As Long, chainRIC As String)
+Sub DownloadOptionsFromSingleChain(chainSheet As Worksheet, optionColumn As Long, chainRIC As String)
     ' Downloads individual option RICs from a single chain RIC
     ' Uses the chain RIC to get the list of option instruments
+    ' Places formula in the specified column to avoid collisions
 
     ' Add the chain RIC formula to download individual options
-    ' Place the formula in column E (Option List)
-    chainSheet.Cells(chainRow, 5).Formula = _
-        "=@TR(""" & chainRIC & """,""CF_NAME;STRIKE_PRC;EXPIR_DATE;PUTCALLIND"",""CH=Fd RH=IN"")"
+    ' Place the formula in row 2 of the specified column
+    chainSheet.Cells(2, optionColumn).Formula = _
+        "=@TR(""" & chainRIC & """,""CF_NAME;STRIKE_PRC;EXPIR_DATE;PUTCALLIND;UNDERLYING"",""CH=Fd RH=IN"")"
 End Sub
 
 ' ============================================
@@ -636,13 +659,62 @@ Function SetupRICListSheetForChain() As Worksheet
 End Function
 
 ' ============================================
-' PROCESS ALL OPTION DATA
+' PROCESS ALL OPTION DATA BY COLUMNS
 ' ============================================
 
-Sub ProcessAllOptionData(chainSheet As Worksheet, ricListSheet As Worksheet)
-    Dim lastChainRow As Long
-    Dim i As Long
+Sub ProcessAllOptionDataByColumns(chainSheet As Worksheet, ricListSheet As Worksheet, totalChains As Long, stepSize As Long)
+    ' New column-based approach to process option data from separate columns
+    Dim col As Long
     Dim ricListRow As Long
+    Dim totalOptions As Long
+    Dim errorCount As Long
+    Dim startColumn As Long
+    Dim optionColumn As Long
+
+    On Error GoTo ErrorHandler
+
+    ricListRow = 2  ' Start from row 2 (after header)
+    totalOptions = 0
+    errorCount = 0
+    startColumn = 7  ' Options start from column G
+
+    If totalChains = 0 Then
+        MsgBox "No chains found to process.", vbExclamation
+        Exit Sub
+    End If
+
+    ' Process each chain's option column
+    For col = 0 To totalChains - 1
+        optionColumn = startColumn + col * stepSize
+
+        Application.StatusBar = "Processing chain " & col & " options from column " & Chr(64 + optionColumn) & "..."
+
+        ' Process this column's option data
+        ProcessSingleColumnOptions chainSheet, ricListSheet, optionColumn, ricListRow, totalOptions, errorCount
+    Next col
+
+    ' Format the RIC_List sheet
+    FormatRICListSheet ricListSheet, ricListRow
+
+    ' Show completion message
+    ShowCompletionMessage totalOptions, errorCount, totalChains
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "Error in ProcessAllOptionDataByColumns: " & Err.Description & vbNewLine & _
+           "Error Number: " & Err.Number & vbNewLine & _
+           "Processing stopped at chain " & col, vbCritical
+End Sub
+
+' ============================================
+' PROCESS SINGLE COLUMN OPTIONS
+' ============================================
+
+Sub ProcessSingleColumnOptions(chainSheet As Worksheet, ricListSheet As Worksheet, _
+                              optionColumn As Long, ByRef ricListRow As Long, _
+                              ByRef totalOptions As Long, ByRef errorCount As Long)
+    Dim lastRow As Long
+    Dim i As Long
     Dim optionDataText As String
     Dim optionLines As Variant
     Dim j As Long
@@ -654,107 +726,40 @@ Sub ProcessAllOptionData(chainSheet As Worksheet, ricListSheet As Worksheet)
     Dim optionType As String
     Dim monthCode As String
     Dim yearCode As String
-    Dim totalOptions As Long
-    Dim errorCount As Long
 
-    On Error GoTo ErrorHandler
+    ' Find last row with data in this column
+    lastRow = chainSheet.Cells(chainSheet.Rows.count, optionColumn).End(xlUp).Row
 
-    lastChainRow = chainSheet.Cells(chainSheet.Rows.count, "D").End(xlUp).Row
-    ricListRow = 2  ' Start from row 2 (after header)
-    totalOptions = 0
-    errorCount = 0
+    ' Process each row in this column starting from row 2
+    For i = 4 To lastRow
+        optionDataText = Trim(CStr(chainSheet.Cells(i, optionColumn).Value))
 
-    If lastChainRow < 2 Then
-        MsgBox "No chain data found to process.", vbExclamation
-        Exit Sub
-    End If
+        ' Skip if no data
+        If optionDataText = "" Or optionDataText = "0" Then GoTo NextOptionRow
+        
+        ' Populate RIC_List row
+        With ricListSheet
+            .Cells(ricListRow, 1).Value = chainSheet.Cells(i, optionColumn).Value  ' RIC
+            .Cells(ricListRow, 2).Value = chainSheet.Cells(i, optionColumn + 3).Value ' Maturity
+            .Cells(ricListRow, 3).Value = chainSheet.Cells(i, optionColumn + 2).Value ' Strike
+            .Cells(ricListRow, 4).Value = chainSheet.Cells(i, optionColumn + 4).Value ' Type
+            .Cells(ricListRow, 5).Value = "n/a" ' Month Code
+            .Cells(ricListRow, 6).Value = "n/a"  ' Year
+            .Cells(ricListRow, 7).Value = chainSheet.Cells(i, optionColumn + 5).Value ' Underlying
+            .Cells(ricListRow, 8).Value = "No"  ' Processed
+        End With
+        ricListRow = ricListRow + 1
 
-    ' Process each chain's option data
-    For i = 2 To lastChainRow
-        ' Get the option data from column E (downloaded from TR formula)
-        optionDataText = CStr(chainSheet.Cells(i, 5).Value)
-
-        ' Skip if no option data
-        If optionDataText = "" Or optionDataText = "0" Then GoTo NextChainData
-
-        ' Split option data into individual option lines
-        ' TR returns data with line breaks between instruments
-        optionLines = Split(optionDataText, vbLf)
-        If UBound(optionLines) = 0 Then optionLines = Split(optionDataText, vbCrLf)
-        If UBound(optionLines) = 0 Then optionLines = Split(optionDataText, Chr(10))
-
-        ' Process each option line
-        For j = 0 To UBound(optionLines)
-            Dim optionLine As String
-            optionLine = Trim(optionLines(j))
-
-            ' Skip empty lines or header lines
-            If optionLine = "" Or InStr(optionLine, "CF_NAME") > 0 Then GoTo NextOptionLine
-
-            ' Parse the option data (format: CF_NAME;STRIKE_PRC;EXPIR_DATE;PUTCALLIND)
-            optionFields = Split(optionLine, ";")
-
-            ' Ensure we have enough fields
-            If UBound(optionFields) < 3 Then GoTo NextOptionLine
-
-            ' Extract data from fields
-            ricCode = Trim(optionFields(0))
-            strike = Val(optionFields(1))
-            expirDate = Trim(optionFields(2))
-            putCallInd = Trim(optionFields(3))
-
-            ' Clean RIC code (remove leading "/" if present)
-            If Left(ricCode, 1) = "/" Then ricCode = Mid(ricCode, 2)
-
-            ' Skip if no valid RIC
-            If ricCode = "" Then GoTo NextOptionLine
-
-            ' Convert put/call indicator to our format
-            If UCase(putCallInd) = "PUT" Or UCase(putCallInd) = "P" Then
-                optionType = "PUT"
-            ElseIf UCase(putCallInd) = "CALL" Or UCase(putCallInd) = "C" Then
-                optionType = "CALL"
-            Else
-                GoTo NextOptionLine  ' Skip if can't determine type
-            End If
-
-            ' Generate month and year codes
-            If IsDate(expirDate) Then
-                On Error Resume Next
-                monthCode = GetMonthCodeFromTable(Month(CDate(expirDate)), optionType)
-                If Err.Number <> 0 Then
-                    monthCode = ""
-                    errorCount = errorCount + 1
-                End If
-                yearCode = Right(CStr(Year(CDate(expirDate))), 2)
-                On Error GoTo ErrorHandler
-            Else
-                monthCode = ""
-                yearCode = ""
-            End If
-
-            ' Populate RIC_List row
-            With ricListSheet
-                .Cells(ricListRow, 1).Value = ricCode  ' RIC
-                .Cells(ricListRow, 2).Value = expirDate  ' Maturity
-                .Cells(ricListRow, 3).Value = strike  ' Strike
-                .Cells(ricListRow, 4).Value = optionType  ' Type
-                .Cells(ricListRow, 5).Value = monthCode  ' Month Code
-                .Cells(ricListRow, 6).Value = yearCode  ' Year
-                .Cells(ricListRow, 7).Formula = "=@TR(A" & ricListRow & ",""EXPIR_DATE"")"  ' Check Existence
-                .Cells(ricListRow, 8).Value = "No"  ' Processed
-            End With
-
-            ricListRow = ricListRow + 1
-            totalOptions = totalOptions + 1
-
-NextOptionLine:
-        Next j
-
-NextChainData:
+NextOptionRow:
     Next i
+End Sub
 
-    ' Format the RIC_List sheet
+
+' ============================================
+' FORMAT RIC LIST SHEET
+' ============================================
+
+Sub FormatRICListSheet(ricListSheet As Worksheet, ricListRow As Long)
     With ricListSheet
         .Columns("A:H").AutoFit
         .Range("B:B").NumberFormat = "mm/dd/yyyy"
@@ -771,9 +776,15 @@ NextChainData:
             End With
         End If
     End With
+End Sub
 
+' ============================================
+' SHOW COMPLETION MESSAGE
+' ============================================
+
+Sub ShowCompletionMessage(totalOptions As Long, errorCount As Long, totalChains As Long)
     Dim resultMsg As String
-    resultMsg = "Processed " & totalOptions & " option RICs from " & (lastChainRow - 1) & " option chains!" & vbNewLine & _
+    resultMsg = "Processed " & totalOptions & " option RICs from " & totalChains & " option chains!" & vbNewLine & _
                 "Data copied to " & SHEET_RIC_LIST & " sheet."
 
     If errorCount > 0 Then
@@ -781,13 +792,8 @@ NextChainData:
     End If
 
     MsgBox resultMsg, vbInformation
-    Exit Sub
-
-ErrorHandler:
-    MsgBox "Error in ProcessAllOptionData: " & Err.Description & vbNewLine & _
-           "Error Number: " & Err.Number & vbNewLine & _
-           "Processing stopped at option " & totalOptions + 1, vbCritical
 End Sub
+
 
 ' ============================================
 ' HELPER FUNCTIONS TO PARSE TR RESULTS
@@ -842,5 +848,9 @@ Function GetPutCallFromTRResult(chainSheet As Worksheet, rowNum As Long) As Stri
         GetPutCallFromTRResult = ""
     End If
 End Function
+
+
+
+
 
 
