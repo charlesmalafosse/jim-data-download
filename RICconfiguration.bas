@@ -1,3 +1,4 @@
+Attribute VB_Name = "RICconfiguration"
 ' ============================================
 ' RIC GENERATOR MODULE
 ' Generates complete list of option RICs based on
@@ -726,6 +727,7 @@ Sub ProcessSingleColumnOptions(chainSheet As Worksheet, ricListSheet As Workshee
     Dim optionType As String
     Dim monthCode As String
     Dim yearCode As String
+    Dim RICvalue As String
 
     ' Find last row with data in this column
     lastRow = chainSheet.Cells(chainSheet.Rows.count, optionColumn).End(xlUp).Row
@@ -737,9 +739,16 @@ Sub ProcessSingleColumnOptions(chainSheet As Worksheet, ricListSheet As Workshee
         ' Skip if no data
         If optionDataText = "" Or optionDataText = "0" Then GoTo NextOptionRow
         
+        RICvalue = ""
+        If Left(chainSheet.Cells(i, optionColumn).Value, 1) = "/" Then
+            RICvalue = Mid(chainSheet.Cells(i, optionColumn).Value, 2)
+        Else
+            RICvalue = chainSheet.Cells(i, optionColumn).Value
+        End If
+        
         ' Populate RIC_List row
         With ricListSheet
-            .Cells(ricListRow, 1).Value = chainSheet.Cells(i, optionColumn).Value  ' RIC
+            .Cells(ricListRow, 1).Value = RICvalue  ' RIC
             .Cells(ricListRow, 2).Value = chainSheet.Cells(i, optionColumn + 3).Value ' Maturity
             .Cells(ricListRow, 3).Value = chainSheet.Cells(i, optionColumn + 2).Value ' Strike
             .Cells(ricListRow, 4).Value = chainSheet.Cells(i, optionColumn + 4).Value ' Type

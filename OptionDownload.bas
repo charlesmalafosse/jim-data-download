@@ -1,4 +1,3 @@
-Attribute VB_Name = "OptionDownload"
 ' ============================================
 ' MODULE 1: Global Configuration and Types
 ' ============================================
@@ -33,6 +32,11 @@ Public Const SHEET_STAGING As String = "Staging"
 Public Const SHEET_QUALITY As String = "QualityReport"
 Public Const SHEET_FUTURE As String = "Future et co"
 
+' RANGE FUTURE DOWNLOAD
+Public Const RANGE_DOWNLOAD As String = "UnderlyingDownload"  '1st column for 1st underlying. Expand right for more underlyings, +3 columns each
+Public Const RANGE_UNDERLYING_START_DATE As String = "UnderlyingStartDate"
+Public Const RANGE_UNDERLYING_END_DATE As String = "UnderlyingEndDate"
+
 ' Types
 Type BatchInfo
     maturityDate As Date
@@ -64,23 +68,175 @@ End Type
 
 Sub RefreshFutureSheet()
     On Error GoTo ErrorHandler
-    
+
     Application.StatusBar = "Refreshing LSEG Future data..."
-    
+
     DoEvents
     Application.Run "WorkspaceRefreshWorksheet", True, 120000, SHEET_FUTURE
     DoEvents
-    
+
     Application.Wait Now + TimeValue("00:00:02")
-    
+
     MsgBox "Double check data in : " & SHEET_FUTURE, vbExclamation
-    
+
     Application.StatusBar = False
     Exit Sub
-    
+
 ErrorHandler:
     MsgBox "Error refreshing data: " & Err.Description, vbExclamation
     Application.StatusBar = False
+End Sub
+
+Sub RefreshFutureUnderlyings()
+    Dim wsRIC As Worksheet
+    Dim wsFuture As Worksheet
+    Dim uniqueUnderlyings As Collection
+    Dim existingUnderlyings As Collection
+    Dim missingUnderlyings As Collection
+    Dim i As Long
+    Dim lastRow As Long
+    Dim underlyingValue As String
+    Dim startCol As Long
+    Dim startRow As Long
+    Dim currentCol As Long
+    Dim foundUnderlying As String
+    Dim underlying As Variant
+    Dim formulaRow As Long
+    Dim formulaCol As Long
+    Dim headerRow As Long
+    Dim headerCol As Long
+    Dim nextAvailableCol As Long
+
+    On Error GoTo ErrorHandler
+
+    Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
+    Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
+    Set uniqueUnderlyings = New Collection
+    Set existingUnderlyings = New Collection
+    Set missingUnderlyings = New Collection
+
+    ' Step 1: Extract unique underlyings from RIC_List column G
+    Application.StatusBar = "Extracting unique underlyings from RIC_List..."
+    lastRow = wsRIC.Cells(wsRIC.Rows.count, "A").End(xlUp).Row
+
+    For i = 2 To lastRow
+        underlyingValue = Trim(CStr(wsRIC.Cells(i, 7).Value))  ' Column G
+
+        If underlyingValue <> "" And underlyingValue <> "0" Then
+            ' Add to unique collection (will ignore duplicates)
+            On Error Resume Next
+            uniqueUnderlyings.Add underlyingValue, underlyingValue
+            On Error GoTo ErrorHandler
+        End If
+    Next i
+
+    If uniqueUnderlyings.count = 0 Then
+        MsgBox "No underlyings found in RIC_List column G", vbExclamation
+        Exit Sub
+    End If
+
+    ' Step 2: Get starting position from RANGE_DOWNLOAD
+    On Error Resume Next
+    startCol = wsFuture.Range(RANGE_DOWNLOAD).Column
+    startRow = wsFuture.Range(RANGE_DOWNLOAD).Row
+    On Error GoTo ErrorHandler
+
+    If startCol = 0 Or startRow = 0 Then
+        MsgBox "Named range '" & RANGE_DOWNLOAD & "' not found in " & SHEET_FUTURE, vbExclamation
+        Exit Sub
+    End If
+
+    ' Step 3: Find existing underlyings and determine next available column
+    Application.StatusBar = "Checking existing underlyings in SHEET_FUTURE..."
+    currentCol = startCol
+    nextAvailableCol = startCol
+
+    ' Scan for existing underlyings (every 3rd column)
+    While currentCol <= 100  ' Reasonable upper limit
+        foundUnderlying = Trim(CStr(wsFuture.Cells(startRow, currentCol).Value))
+
+        If foundUnderlying <> "" Then
+            existingUnderlyings.Add foundUnderlying, foundUnderlying
+            nextAvailableCol = currentCol + 3  ' Next available is 3 columns after last found
+        End If
+
+        currentCol = currentCol + 3
+
+        ' Break if we find 3 consecutive empty blocks
+        If wsFuture.Cells(startRow, currentCol).Value = "" And _
+           wsFuture.Cells(startRow, currentCol + 3).Value = "" And _
+           wsFuture.Cells(startRow, currentCol + 6).Value = "" Then
+        End If
+    Wend
+
+    ' Step 4: Identify missing underlyings
+    Dim found As Boolean
+    For Each underlying In uniqueUnderlyings
+        found = False
+
+        ' Check if this underlying already exists
+        On Error Resume Next
+        found = (existingUnderlyings(CStr(underlying)) <> "")
+        On Error GoTo ErrorHandler
+
+        If Not found Then
+            missingUnderlyings.Add underlying
+        End If
+    Next underlying
+
+    ' Step 5: Add RHistory formulas for missing underlyings
+    If missingUnderlyings.count > 0 Then
+        Application.StatusBar = "Adding RHistory formulas for " & missingUnderlyings.count & " missing underlyings..."
+
+        currentCol = nextAvailableCol
+
+        For Each underlying In missingUnderlyings
+            ' Calculate formula position (row-1, col-1 relative to RANGE_DOWNLOAD position)
+            formulaRow = startRow + 2
+            formulaCol = currentCol - 1
+            headerRow = startRow + 1
+            headerCol = currentCol - 1
+            
+            ' Add header
+            wsFuture.Cells(headerRow, headerCol).Value = "Date"
+            wsFuture.Cells(headerRow, headerCol + 1).Value = "Last Price"
+
+            ' Add the RHistory formula
+            wsFuture.Cells(formulaRow, formulaCol).Formula = _
+                "=RHistory(""" & underlying & """," & _
+                """.Timestamp;.Close""," & _
+                """NBROWS:5000 INTERVAL:1D"",,""Sort:ASC"")"
+
+            ' Add the underlying symbol in the RANGE_DOWNLOAD row/column
+            wsFuture.Cells(startRow, currentCol).Value = underlying
+
+            ' Add metadata in the next column
+            wsFuture.Cells(startRow, currentCol + 1).Value = "Added: " & Format(Now, "yyyy-mm-dd hh:mm")
+
+            ' Move to next 3-column block
+            currentCol = currentCol + 3
+        Next underlying
+
+        ' Step 6: Refresh LSEG workspace
+        Application.StatusBar = "Refreshing LSEG Future data..."
+        DoEvents
+        Application.Run "WorkspaceRefreshWorksheet", True, 120000, SHEET_FUTURE
+        DoEvents
+
+        Application.Wait Now + TimeValue("00:00:03")
+
+        MsgBox "Added " & missingUnderlyings.count & " underlyings to SHEET_FUTURE." & vbNewLine & _
+               "Data refresh complete. Please verify the downloaded data.", vbInformation
+    Else
+        MsgBox "All required underlyings are already present in SHEET_FUTURE.", vbInformation
+    End If
+
+    Application.StatusBar = False
+    Exit Sub
+
+ErrorHandler:
+    Application.StatusBar = False
+    MsgBox "Error in RefreshFutureUnderlyings: " & Err.Description, vbExclamation
 End Sub
 
 
@@ -139,7 +295,15 @@ Sub MainDownloadProcess()
                      vbNewLine & "Continue?", vbYesNo + vbQuestion)
     
     If response = vbNo Then Exit Sub
-    
+
+    ' Check Underlying data
+    If Not CheckUnderlyings() Then
+        MsgBox "Process stopped: Missing underlying futures data." & vbNewLine & _
+               "Please download the missing underlyings first before processing options.", _
+               vbExclamation, "Missing Underlyings"
+        Exit Sub
+    End If
+
     ' Start batch processing
     ProcessAllBatchesFromRICList
     
@@ -186,12 +350,12 @@ Sub ProcessAllBatchesFromRICList()
         ' Show batch details
         response = MsgBox("Process batch:" & vbNewLine & _
                          "Rows: " & batchStart & " to " & batchEnd & vbNewLine & _
-                         "Maturity: " & Format(batchMaturity, "mmm-yyyy") & vbNewLine & _
-                         "Type: " & batchType & vbNewLine & _
-                         "Strikes: " & batchStrikeMin & " to " & batchStrikeMax & vbNewLine & _
-                         "RICs: " & (batchEnd - batchStart + 1) & vbNewLine & _
                          vbNewLine & "Continue?", vbYesNo + vbQuestion, "Batch Processing")
-        
+'                         "Maturity: " & Format(batchMaturity, "mmm-yyyy") & vbNewLine & _
+'                         "Type: " & batchType & vbNewLine & _
+'                         "Strikes: " & batchStrikeMin & " to " & batchStrikeMax & vbNewLine & _
+'                         "RICs: " & (batchEnd - batchStart + 1) & vbNewLine & _
+
         If response = vbNo Then
             continueProcess = False
             Exit Sub
@@ -380,50 +544,46 @@ Sub PrePopulateGreekFormulas(ws As Worksheet, startRow As Long, maxRows As Long,
             spot & "," & strike & "," & timeToExp & "," & _
             rate & ",0,I" & i & "))"
 
-        ' Speed - Column V (22)
-        ws.Cells(i, 22).Formula = "=IF(B" & i & "="""",""""," & _
-            "CGBlackScholes(""dvdv"",""" & callPutFlag & """," & _
-            spot & "," & strike & "," & timeToExp & "," & _
-            rate & ",0,I" & i & ",J" & i & "))"
+        ' DDELTA_DSPOT removed - columns shifted up by 1
 
-        ' DDELTA/DVOL - Column W (23)
-        ws.Cells(i, 23).Formula = "=IF(B" & i & "="""",""""," & _
+        ' DDELTA/DVOL - Column V (22)
+        ws.Cells(i, 22).Formula = "=IF(B" & i & "="""",""""," & _
             "CGBlackScholes(""dddv"",""" & callPutFlag & """," & _
             spot & "," & strike & "," & timeToExp & "," & _
             rate & ",0,I" & i & ",J" & i & "))"
 
-        ' DDELTA/DVOLDVOL - Column X (24)
-        ws.Cells(i, 24).Formula = "=IF(B" & i & "="""",""""," & _
+        ' DDELTA/DVOLDVOL - Column W (23)
+        ws.Cells(i, 23).Formula = "=IF(B" & i & "="""",""""," & _
             "CGBlackScholes(""dvv"",""" & callPutFlag & """," & _
             spot & "," & strike & "," & timeToExp & "," & _
             rate & ",0,I" & i & ",J" & i & "))"
 
-        ' Charm - Column Y (25)
-        ws.Cells(i, 25).Formula = "=IF(B" & i & "="""",""""," & _
+        ' Charm - Column X (24)
+        ws.Cells(i, 24).Formula = "=IF(B" & i & "="""",""""," & _
             "CGBlackScholes(""dt"",""" & callPutFlag & """," & _
             spot & "," & strike & "," & timeToExp & "," & _
             rate & ",0,I" & i & ",J" & i & "))"
 
-        ' DGamma/DSpot - Column Z (26)
-        ws.Cells(i, 26).Formula = "=IF(B" & i & "="""",""""," & _
+        ' DGamma/DSpot - Column Y (25)
+        ws.Cells(i, 25).Formula = "=IF(B" & i & "="""",""""," & _
             "CGBlackScholes(""gps"",""" & callPutFlag & """," & _
             spot & "," & strike & "," & timeToExp & "," & _
             rate & ",0,I" & i & ",J" & i & "))"
 
-        ' Zomma - Column AA (27)
-        ws.Cells(i, 27).Formula = "=IF(B" & i & "="""",""""," & _
+        ' Zomma - Column Z (26)
+        ws.Cells(i, 26).Formula = "=IF(B" & i & "="""",""""," & _
             "CGBlackScholes(""gpv"",""" & callPutFlag & """," & _
             spot & "," & strike & "," & timeToExp & "," & _
             rate & ",0,I" & i & ",J" & i & "))"
 
-        ' Vomma - Column AB (28)
-        ws.Cells(i, 28).Formula = "=IF(B" & i & "="""",""""," & _
+        ' Vomma - Column AA (27)
+        ws.Cells(i, 27).Formula = "=IF(B" & i & "="""",""""," & _
             "CGBlackScholes(""dvdv"",""" & callPutFlag & """," & _
             spot & "," & strike & "," & timeToExp & "," & _
             rate & ",0,I" & i & ",J" & i & "))"
 
-        ' Ultima - Column AC (29)
-        ws.Cells(i, 29).Formula = "=IF(B" & i & "="""",""""," & _
+        ' Ultima - Column AB (28)
+        ws.Cells(i, 28).Formula = "=IF(B" & i & "="""",""""," & _
             "CGBlackScholes(""vvv"",""" & callPutFlag & """," & _
             spot & "," & strike & "," & timeToExp & "," & _
             rate & ",0,I" & i & ",J" & i & "))"
@@ -436,7 +596,7 @@ Sub CopyDataRowsToStaging(ws As Worksheet, startRow As Long, maxRows As Long)
     Dim i As Long
     Dim endRow As Long
     Dim wsDest As Worksheet
-    Dim nextRow As Long
+    Dim NextRow As Long
 
     Set wsDest = ThisWorkbook.Worksheets(SHEET_STAGING)
 
@@ -446,36 +606,36 @@ Sub CopyDataRowsToStaging(ws As Worksheet, startRow As Long, maxRows As Long)
     For i = startRow To endRow
         If Not IsEmpty(ws.Cells(i, 2).Value) And IsNumeric(ws.Cells(i, 2).Value) Then
             ' This row has LSEG data, copy it to staging with proper column mapping
-            nextRow = wsDest.Cells(wsDest.Rows.count, 1).End(xlUp).Row + 1
+            NextRow = wsDest.Cells(wsDest.Rows.count, 1).End(xlUp).Row + 1
 
             ' Map columns to staging sheet (matching CSV export format)
-            wsDest.Cells(nextRow, 1).Value = ws.Cells(i, 1).Value   ' Spot_Date
-            wsDest.Cells(nextRow, 2).Value = ws.Cells(i, 2).Value   ' Premium
-            wsDest.Cells(nextRow, 3).Value = ws.Cells(i, 3).Value   ' Ticker
-            wsDest.Cells(nextRow, 4).Value = ws.Cells(i, 4).Value   ' Maturity
-            wsDest.Cells(nextRow, 5).Value = ws.Cells(i, 5).Value   ' Interest_rate
-            wsDest.Cells(nextRow, 6).Value = ws.Cells(i, 6).Value   ' Spot
-            wsDest.Cells(nextRow, 7).Value = ws.Cells(i, 7).Value   ' Strike
-            wsDest.Cells(nextRow, 8).Value = ws.Cells(i, 8).Value   ' Type
-            wsDest.Cells(nextRow, 9).Value = ws.Cells(i, 9).Value   ' Implied_Volatility
-            wsDest.Cells(nextRow, 10).Value = ws.Cells(i, 10).Value ' Delta
-            wsDest.Cells(nextRow, 11).Value = ws.Cells(i, 11).Value ' Vega
-            wsDest.Cells(nextRow, 12).Value = ws.Cells(i, 12).Value ' Gamma
-            wsDest.Cells(nextRow, 13).Value = ws.Cells(i, 13).Value ' Theta
-            wsDest.Cells(nextRow, 14).Value = ws.Cells(i, 14).Value ' Rho
-            wsDest.Cells(nextRow, 15).Value = ws.Cells(i, 17).Value ' Lot_size (from col Q)
-            wsDest.Cells(nextRow, 16).Value = ws.Cells(i, 18).Value ' Name
-            wsDest.Cells(nextRow, 17).Value = ws.Cells(i, 19).Value ' Reference
-            wsDest.Cells(nextRow, 18).Value = ws.Cells(i, 20).Value ' ccy_pair
-            wsDest.Cells(nextRow, 19).Value = ws.Cells(i, 21).Value ' Dividend
-            wsDest.Cells(nextRow, 20).Value = ws.Cells(i, 22).Value ' DDELTA_DSPOT (from col V)
-            wsDest.Cells(nextRow, 21).Value = ws.Cells(i, 23).Value ' DDELTA_DVOL (from col W)
-            wsDest.Cells(nextRow, 22).Value = ws.Cells(i, 24).Value ' DDELTA_DVOLDVOL (from col X)
-            wsDest.Cells(nextRow, 23).Value = ws.Cells(i, 25).Value ' DDELTA_DTIME (from col Y)
-            wsDest.Cells(nextRow, 24).Value = ws.Cells(i, 26).Value ' DGAMMA_DSPOT (from col Z)
-            wsDest.Cells(nextRow, 25).Value = ws.Cells(i, 27).Value ' DGAMMA_DVOL (from col AA)
-            wsDest.Cells(nextRow, 26).Value = ws.Cells(i, 28).Value ' DVEGA_DVOL (from col AB)
-            wsDest.Cells(nextRow, 27).Value = ws.Cells(i, 29).Value ' DVEGA_DVOLDVOL (from col AC)
+            wsDest.Cells(NextRow, 1).Value = ws.Cells(i, 1).Value   ' Spot_Date
+            wsDest.Cells(NextRow, 2).Value = ws.Cells(i, 2).Value   ' Premium
+            wsDest.Cells(NextRow, 3).Value = ws.Cells(i, 3).Value   ' Ticker
+            wsDest.Cells(NextRow, 4).Value = ws.Cells(i, 4).Value   ' Maturity
+            wsDest.Cells(NextRow, 5).Value = ws.Cells(i, 5).Value   ' Interest_rate
+            wsDest.Cells(NextRow, 6).Value = ws.Cells(i, 6).Value   ' Spot
+            wsDest.Cells(NextRow, 7).Value = ws.Cells(i, 7).Value   ' Strike
+            wsDest.Cells(NextRow, 8).Value = ws.Cells(i, 8).Value   ' Type
+            wsDest.Cells(NextRow, 9).Value = ws.Cells(i, 9).Value   ' Implied_Volatility
+            wsDest.Cells(NextRow, 10).Value = ws.Cells(i, 10).Value ' Delta
+            wsDest.Cells(NextRow, 11).Value = ws.Cells(i, 11).Value ' Vega
+            wsDest.Cells(NextRow, 12).Value = ws.Cells(i, 12).Value ' Gamma
+            wsDest.Cells(NextRow, 13).Value = ws.Cells(i, 13).Value ' Theta
+            wsDest.Cells(NextRow, 14).Value = ws.Cells(i, 14).Value ' Rho
+            wsDest.Cells(NextRow, 15).Value = ws.Cells(i, 17).Value ' Lot_size (from col Q)
+            wsDest.Cells(NextRow, 16).Value = ws.Cells(i, 18).Value ' Name
+            wsDest.Cells(NextRow, 17).Value = ws.Cells(i, 19).Value ' Reference
+            wsDest.Cells(NextRow, 18).Value = ws.Cells(i, 20).Value ' ccy_pair
+            wsDest.Cells(NextRow, 19).Value = ws.Cells(i, 21).Value ' Dividend
+            ' DDELTA_DSPOT removed - columns shifted
+            wsDest.Cells(NextRow, 20).Value = ws.Cells(i, 22).Value ' DDELTA_DVOL (from col V)
+            wsDest.Cells(NextRow, 21).Value = ws.Cells(i, 23).Value ' DDELTA_DVOLDVOL (from col W)
+            wsDest.Cells(NextRow, 22).Value = ws.Cells(i, 24).Value ' DDELTA_DTIME (from col X)
+            wsDest.Cells(NextRow, 23).Value = ws.Cells(i, 25).Value ' DGAMMA_DSPOT (from col Y)
+            wsDest.Cells(NextRow, 24).Value = ws.Cells(i, 26).Value ' DGAMMA_DVOL (from col Z)
+            wsDest.Cells(NextRow, 25).Value = ws.Cells(i, 27).Value ' DVEGA_DVOL (from col AA)
+            wsDest.Cells(NextRow, 26).Value = ws.Cells(i, 28).Value ' DVEGA_DVOLDVOL (from col AB)
         Else
             ' No more data in this section
             Exit For
@@ -1063,16 +1223,15 @@ Sub ClearCollectionSheet()
     ws.Range("S1").Value = "Reference"
     ws.Range("T1").Value = "ccy_pair"
     ws.Range("U1").Value = "Dividend"
-    ws.Range("V1").Value = "DDELTA_DSPOT"
-    ws.Range("W1").Value = "DDELTA_DVOL"
-    ws.Range("X1").Value = "DDELTA_DVOLDVOL"
-    ws.Range("Y1").Value = "DDELTA_DTIME"
-    ws.Range("Z1").Value = "DGAMMA_DSPOT"
-    ws.Range("AA1").Value = "DGAMMA_DVOL"
-    ws.Range("AB1").Value = "DVEGA_DVOL"
-    ws.Range("AC1").Value = "DVEGA_DVOLDVOL"
+    ws.Range("V1").Value = "DDELTA/DVOL"
+    ws.Range("W1").Value = "DDELTA/DVOLDVOL"
+    ws.Range("X1").Value = "DDELTA/DTIME"
+    ws.Range("Y1").Value = "DGAMMA/DSPOT"
+    ws.Range("Z1").Value = "DGAMMA/DVOL"
+    ws.Range("AA1").Value = "DVEGA/DVOL"
+    ws.Range("AB1").Value = "DVEGA/DVOLDVOL"
 
-    ws.Range("A1:AC1").Font.Bold = True
+    ws.Range("A1:AB1").Font.Bold = True
 End Sub
 
 Sub SetupStagingSheet()
@@ -1099,16 +1258,15 @@ Sub SetupStagingSheet()
     ws.Range("Q1").Value = "Reference"
     ws.Range("R1").Value = "ccy_pair"
     ws.Range("S1").Value = "Dividend"
-    ws.Range("T1").Value = "DDELTA_DSPOT"
-    ws.Range("U1").Value = "DDELTA_DVOL"
-    ws.Range("V1").Value = "DDELTA_DVOLDVOL"
-    ws.Range("W1").Value = "DDELTA_DTIME"
-    ws.Range("X1").Value = "DGAMMA_DSPOT"
-    ws.Range("Y1").Value = "DGAMMA_DVOL"
-    ws.Range("Z1").Value = "DVEGA_DVOL"
-    ws.Range("AA1").Value = "DVEGA_DVOLDVOL"
+    ws.Range("T1").Value = "DDELTA/DVOL"
+    ws.Range("U1").Value = "DDELTA/DVOLDVOL"
+    ws.Range("V1").Value = "DDELTA/DTIME"
+    ws.Range("W1").Value = "DGAMMA/DSPOT"
+    ws.Range("X1").Value = "DGAMMA/DVOL"
+    ws.Range("Y1").Value = "DVEGA/DVOL"
+    ws.Range("Z1").Value = "DVEGA/DVOLDVOL"
 
-    ws.Range("A1:AA1").Font.Bold = True
+    ws.Range("A1:Z1").Font.Bold = True
 End Sub
 
 Sub SetupQualitySheet()
@@ -1117,23 +1275,136 @@ Sub SetupQualitySheet()
     ws.Cells.Clear
 End Sub
 
+Function CheckUnderlyings() As Boolean
+    Dim wsRIC As Worksheet
+    Dim wsFuture As Worksheet
+    Dim uniqueUnderlyings As Collection
+    Dim existingUnderlyings As Collection
+    Dim missingUnderlyings As Collection
+    Dim underlyingInfo As String
+    Dim i As Long
+    Dim lastRow As Long
+    Dim underlyingValue As String
+    Dim startCol As Long
+    Dim rowDownload As Long
+    Dim currentCol As Long
+    Dim foundUnderlying As String
+    Dim reportMsg As String
+
+    Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
+    Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
+    Set uniqueUnderlyings = New Collection
+    Set existingUnderlyings = New Collection
+    Set missingUnderlyings = New Collection
+
+    ' Step 1: Extract unique underlyings from RIC_List column G
+    Application.StatusBar = "Extracting unique underlyings from RIC_List..."
+    lastRow = wsRIC.Cells(wsRIC.Rows.count, "A").End(xlUp).Row
+
+    For i = 2 To lastRow
+        underlyingValue = Trim(CStr(wsRIC.Cells(i, 7).Value))  ' Column G
+
+        If underlyingValue <> "" And underlyingValue <> "0" Then
+            ' Add to unique collection (will ignore duplicates)
+            On Error Resume Next
+            uniqueUnderlyings.Add underlyingValue, underlyingValue
+            On Error GoTo 0
+        End If
+    Next i
+
+    ' Step 2: Get starting column from named range
+    On Error Resume Next
+    startCol = wsFuture.Range(RANGE_DOWNLOAD).Column
+    rowDownload = wsFuture.Range(RANGE_DOWNLOAD).Row
+    On Error GoTo 0
+
+    If startCol = 0 Then
+        MsgBox "Named range '" & RANGE_DOWNLOAD & "' not found in " & SHEET_FUTURE, vbExclamation
+        Exit Function
+    End If
+
+    ' Step 3: Scan SHEET_FUTURE for existing underlyings (every 3rd column)
+    Application.StatusBar = "Scanning SHEET_FUTURE for existing underlyings..."
+    currentCol = startCol
+
+    While currentCol <= 100 ' Reasonable upper limit
+        foundUnderlying = Trim(CStr(wsFuture.Cells(rowDownload, currentCol).Value))   ' Metadata column
+
+        If foundUnderlying <> "" Then
+            existingUnderlyings.Add foundUnderlying & " (Col " & (64 + currentCol) & ")", foundUnderlying
+        End If
+
+        currentCol = currentCol + 3  ' Move to next 3-column block
+
+        ' Break if we find 3 consecutive empty blocks
+        If wsFuture.Cells(2, currentCol).Value = "" And _
+           wsFuture.Cells(2, currentCol + 3).Value = "" And _
+           wsFuture.Cells(2, currentCol + 6).Value = "" Then
+        End If
+    Wend
+
+    ' Step 4: Compare and identify missing underlyings
+    Dim underlying As Variant
+    Dim found As Boolean
+
+    For Each underlying In uniqueUnderlyings
+        found = False
+
+        Dim existing As Variant
+        For Each existing In existingUnderlyings
+            If InStr(CStr(existing), CStr(underlying)) > 0 Then
+                found = True
+                Exit For
+            End If
+        Next existing
+
+        If Not found Then
+            missingUnderlyings.Add underlying
+        End If
+    Next underlying
+
+    ' Step 5: Generate report
+    reportMsg = "UNDERLYINGS CHECK REPORT" & vbNewLine & String(30, "=") & vbNewLine & vbNewLine
+
+    If existingUnderlyings.count > 0 Then
+        reportMsg = reportMsg & "EXISTING UNDERLYINGS:" & vbNewLine
+        For Each existing In existingUnderlyings
+            reportMsg = reportMsg & "  " & existing & vbNewLine
+        Next existing
+        reportMsg = reportMsg & vbNewLine
+    End If
+
+    If missingUnderlyings.count > 0 Then
+        reportMsg = reportMsg & "MISSING UNDERLYINGS (need download):" & vbNewLine
+        For Each underlying In missingUnderlyings
+            reportMsg = reportMsg & "  " & underlying & vbNewLine
+        Next underlying
+        reportMsg = reportMsg & vbNewLine
+    Else
+        reportMsg = reportMsg & "All underlyings are available in SHEET_FUTURE!"
+    End If
+
+    Application.StatusBar = False
+    MsgBox reportMsg, vbInformation, "Underlyings Check Results"
+
+    ' Return True if all underlyings are available, False if some are missing
+    CheckUnderlyings = (missingUnderlyings.count = 0)
+End Function
+
 Sub ExportToCSV()
     Dim stagingWs As Worksheet
     Dim csvPath As String
     Dim fileName As String
-    
+
     Set stagingWs = ThisWorkbook.Worksheets(SHEET_STAGING)
-    
+
     fileName = g_UnderlyingTicker & "_" & Format(Date, "yyyymm") & ".csv"
     csvPath = ThisWorkbook.Path & "\" & fileName
-    
+
     stagingWs.Copy
-    
+
     ActiveWorkbook.SaveAs fileName:=csvPath, FileFormat:=xlCSV
     ActiveWorkbook.Close False
-    
+
     MsgBox "Data exported to: " & csvPath, vbInformation
 End Sub
-
-
-
