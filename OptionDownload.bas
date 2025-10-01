@@ -7,6 +7,7 @@ Option Explicit
 
 ' Configuration Variables
 Public g_UnderlyingTicker As String
+Public g_NamePrefix As String
 Public g_RootRIC As String
 Public g_SpotPrice As Double
 Public g_StrikeStep As Integer
@@ -37,6 +38,7 @@ Public Const SHEET_FUTURE As String = "Future et co"
 Public Const RANGE_DOWNLOAD As String = "UnderlyingDownload"  '1st column for 1st underlying. Expand right for more underlyings, +3 columns each
 Public Const RANGE_UNDERLYING_START_DATE As String = "UnderlyingStartDate"
 Public Const RANGE_UNDERLYING_END_DATE As String = "UnderlyingEndDate"
+Public Const RANGE_RFR As String = "RFR"
 
 ' Types
 Type BatchInfo
@@ -413,7 +415,9 @@ Sub ProcessBatchFromRICList(startRow As Long, endRow As Long)
                                  wsRIC.Cells(i, 3).Value, _
                                  wsRIC.Cells(i, 4).Value, _
                                  wsRIC.Cells(i, 2).Value, _
-                                 i  ' RIC row reference
+                                 i, _
+                                 wsRIC.Cells(i, 7).Value, _
+                                 ric
 
         formulaCount = formulaCount + 1
 
@@ -427,6 +431,10 @@ NextRIC:
 
         ' Wait for refresh to complete
         Application.Wait Now + TimeValue("00:00:05")
+        
+        ' Recompute Formulas
+        wsCollection.Calculate
+        
 
         ' Process each formula result (they're spaced every 300 rows)
         ' Now we only need to copy rows with actual data
@@ -451,7 +459,7 @@ End Sub
 
 ' New helper function to pre-populate Greek formulas for all 300 rows
 Sub PrePopulateGreekFormulas(ws As Worksheet, startRow As Long, maxRows As Long, _
-                             strike As Double, optType As String, maturity As Date, ricRowRef As Long)
+                             strike As Double, optType As String, maturity As Date, ricRowRef As Long, underlyingTicker As String, optionRic As String)
     Dim i As Long
     Dim endRow As Long
     Dim callPutFlag As String
@@ -459,7 +467,7 @@ Sub PrePopulateGreekFormulas(ws As Worksheet, startRow As Long, maxRows As Long,
     Dim rate As Double
     Dim timeToExp As Double
 
-    spot = GetSpotPrice()
+    spot = GetSpotPrice(underlyingTicker)
     rate = GetRiskFreeRate()
     timeToExp = Application.Max((maturity - Date) / 365, 0.001)
 
@@ -471,26 +479,27 @@ Sub PrePopulateGreekFormulas(ws As Worksheet, startRow As Long, maxRows As Long,
     If moneyness <= 0 Or moneyness > 10 Then Exit Sub
 
     ' Convert P/C to c/p for functions
-    If optType = "C" Then
-        callPutFlag = "c"
+    If optType = "CALL" Then
+        callPutFlag = "C"
     Else
-        callPutFlag = "p"
+        callPutFlag = "P"
     End If
 
     endRow = startRow + maxRows - 1
 
     For i = startRow To endRow
         ' Store metadata
-        ws.Cells(i, 3).Value = g_UnderlyingTicker
+        ws.Cells(i, 3).Value = underlyingTicker & " " & optType & " " & strike
         ws.Cells(i, 4).Value = maturity
         ws.Cells(i, 5).Value = rate
         ws.Cells(i, 6).Value = spot
         ws.Cells(i, 7).Value = strike
         ws.Cells(i, 8).Value = optType
         ws.Cells(i, 15).Value = ricRowRef
+        ws.Cells(i, 16).Value = optionRic
         ws.Cells(i, 17).Value = g_LotSize
-        ws.Cells(i, 18).Value = ""
-        ws.Cells(i, 19).Value = ""
+        ws.Cells(i, 18).Value = g_NamePrefix & " " & optType & " " & strike & " " & Format(maturity, "mmm-yyyy")
+        ws.Cells(i, 19).Value = underlyingTicker
         ws.Cells(i, 20).Value = g_Currency
         ws.Cells(i, 21).Value = 0
 
@@ -690,7 +699,7 @@ Sub ValidateAndUpdateRICListWithSpacing(wsCollection As Worksheet, formulaCount 
                 If lastIV > 0 Then
                     wsRIC.Cells(ricRow, 11).Value = lastIV  ' IV
                     validationResult = ValidateIV(lastIV, wsRIC.Cells(ricRow, 3).Value, _
-                                                 GetSpotPrice(), wsRIC.Cells(ricRow, 2).Value)
+                                                 GetSpotPrice(wsRIC.Cells(ricRow, 7).Value), wsRIC.Cells(ricRow, 2).Value)
                     wsRIC.Cells(ricRow, 13).Value = validationResult  ' Validation
                 End If
                 
@@ -749,7 +758,7 @@ Sub SetupRICListSheet()
             .Range("D1").Value = "Type"
             .Range("E1").Value = "Month Code"
             .Range("F1").Value = "Year"
-            .Range("G1").Value = "Check Existence"
+            .Range("G1").Value = "Underlying"
             .Range("H1").Value = "Processed"
         End With
     End If
@@ -889,7 +898,7 @@ Sub ValidateAndUpdateRICList(wsCollection As Worksheet, startRow As Long, endRow
                 If IsNumeric(iv) Then
                     wsRIC.Cells(ricRow, 11).Value = iv  ' IV
                     validationResult = ValidateIV(CDbl(iv), wsRIC.Cells(ricRow, 3).Value, _
-                                                 GetSpotPrice(), wsRIC.Cells(ricRow, 2).Value)
+                                                 GetSpotPrice(wsRIC.Cells(ricRow, 7).Value), wsRIC.Cells(ricRow, 2).Value)
                     wsRIC.Cells(ricRow, 13).Value = validationResult  ' Validation
                 End If
                 
@@ -1009,7 +1018,7 @@ Sub CopyFakeDownloadToDataCollection()
     
     ' Set references
     Set wsSrc = ThisWorkbook.Sheets("FAKE_DOWNLOAD")
-    Set wsDst = ThisWorkbook.Sheets("Data Collection")
+    Set wsDst = ThisWorkbook.Sheets("DataCollection")
     
     ' Find last used row in source (col A)
     lastRow = wsSrc.Cells(wsSrc.Rows.count, "A").End(xlUp).Row
@@ -1024,46 +1033,6 @@ Sub CopyFakeDownloadToDataCollection()
     Application.CutCopyMode = False
 End Sub
 
-Sub CalculateGreeks(ws As Worksheet, startRow As Long, endRow As Long)
-    Dim i As Long
-    Dim spotDate As Variant
-    Dim premium As Variant
-    Dim strike As Double
-    Dim spot As Double
-    Dim rate As Double
-    Dim maturity As Date
-    Dim optType As String
-    Dim timeToExp As Double
-    
-    spot = GetSpotPrice()
-    rate = GetRiskFreeRate()
-    
-    For i = startRow To endRow
-        spotDate = ws.Cells(i, 1).Value
-        premium = ws.Cells(i, 2).Value
-        strike = ws.Cells(i, 7).Value
-        maturity = ws.Cells(i, 4).Value
-        optType = ws.Cells(i, 8).Value
-        
-        If Not IsEmpty(premium) And IsNumeric(premium) Then
-            timeToExp = Application.Max((maturity - Date) / 365, 0.001)
-            
-            ws.Cells(i, 5).Value = rate
-            ws.Cells(i, 6).Value = spot
-            
-            ' Calculate IV
-            ws.Cells(i, 9).Formula = "=IF(B" & i & "="""",""""," & _
-                "GBlackScholesImpVolBisection(""" & optType & """," & _
-                strike & "," & spot & "," & timeToExp & "," & _
-                rate & ",0," & premium & "))"
-            
-            ' Calculate Delta
-            ws.Cells(i, 10).Formula = "=IF(B" & i & "="""",""""," & _
-                "GBlackScholesNGreeks(""Delta""," & strike & "," & _
-                spot & "," & rate & "," & timeToExp & ",0,I" & i & "))"
-        End If
-    Next i
-End Sub
 
 Function ValidateIV(impliedVol As Double, strike As Double, _
                    spot As Double, maturity As Date) As String
@@ -1170,6 +1139,7 @@ Function LoadConfiguration() As Boolean
     g_DateStart = ws.Range("dateStart").Value
     g_DateEnd = ws.Range("dateEnd").Value
     g_BatchSize = ws.Range("batchSize").Value
+    g_NamePrefix = ws.Range("namePrefix").Value
     
     g_PutStrikeMin = ws.Range("minStrikePut").Value
     g_PutStrikeMax = ws.Range("maxStrikePut").Value
@@ -1183,17 +1153,96 @@ ErrorHandler:
     LoadConfiguration = False
 End Function
 
-Function GetSpotPrice() As Double
+Function GetSpotPrice(underlyingTicker As String) As Double
+    Dim wsFuture As Worksheet
+    Dim startCol As Long
+    Dim startRow As Long
+    Dim currentCol As Long
+    Dim foundUnderlying As String
+    Dim priceCol As Long
+    Dim lastRow As Long
+    Dim spotPrice As Double
+
     On Error Resume Next
-    GetSpotPrice = ThisWorkbook.Worksheets(SHEET_FUTURE).Range("B2").Value
-    If GetSpotPrice = 0 Then GetSpotPrice = g_SpotPrice
+
+    Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
+
+    ' Get starting position from RANGE_DOWNLOAD
+    startCol = wsFuture.Range(RANGE_DOWNLOAD).Column
+    startRow = wsFuture.Range(RANGE_DOWNLOAD).Row
+
+    If startCol = 0 Or startRow = 0 Then
+        ' Named range not found, fall back to global variable
+        GetSpotPrice = g_SpotPrice
+        On Error GoTo 0
+        Exit Function
+    End If
+
+    ' Scan for the underlying ticker (every 3rd column, same pattern as RefreshFutureUnderlyings)
+    currentCol = startCol
+
+    While currentCol <= 100  ' Reasonable upper limit
+        foundUnderlying = Trim(CStr(wsFuture.Cells(startRow, currentCol).Value))
+
+        If foundUnderlying = underlyingTicker Then
+            ' Found the matching underlying
+            ' The "Last Price" column is at currentCol + 1 (relative to the Date column at currentCol - 1)
+            ' So the actual price data is at currentCol
+            priceCol = currentCol
+
+            ' Find the last non-empty row in the price column
+            lastRow = wsFuture.Cells(wsFuture.Rows.count, priceCol).End(xlUp).Row
+
+            ' Get the most recent spot price (skip header rows)
+            If lastRow > startRow + 2 Then
+                spotPrice = wsFuture.Cells(lastRow, priceCol).Value
+
+                If spotPrice > 0 Then
+                    GetSpotPrice = spotPrice
+                    On Error GoTo 0
+                    Exit Function
+                End If
+            End If
+        End If
+
+        currentCol = currentCol + 3
+
+        ' Break if we find 3 consecutive empty blocks
+        If wsFuture.Cells(startRow, currentCol).Value = "" And _
+           wsFuture.Cells(startRow, currentCol + 3).Value = "" And _
+           wsFuture.Cells(startRow, currentCol + 6).Value = "" Then
+        End If
+    Wend
+
+    ' If we reach here, underlying not found or no valid price - fall back to global variable
+    GetSpotPrice = g_SpotPrice
+
     On Error GoTo 0
 End Function
 
 Function GetRiskFreeRate() As Double
+    Dim wsFuture As Worksheet
+    Dim rfrRange As Range
+    Dim lastRow As Long
+    Dim rfr As Double
+
     On Error Resume Next
-    GetRiskFreeRate = ThisWorkbook.Worksheets(SHEET_FUTURE).Range("E2").Value
-    If GetRiskFreeRate = 0 Then GetRiskFreeRate = 0.04
+    Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
+    Set rfrRange = wsFuture.Range(RANGE_RFR)
+
+    If Not rfrRange Is Nothing Then
+        lastRow = rfrRange.Cells(rfrRange.Rows.count, 1).End(xlUp).Row - rfrRange.Row + 1
+        If lastRow > 1 Then
+            rfr = rfrRange.Cells(lastRow, 1).Value
+            If rfr > 0 Then
+                GetRiskFreeRate = rfr
+                On Error GoTo 0
+                Exit Function
+            End If
+        End If
+    End If
+
+    GetRiskFreeRate = 0.04
     On Error GoTo 0
 End Function
 
@@ -1409,5 +1458,3 @@ Sub ExportToCSV()
 
     MsgBox "Data exported to: " & csvPath, vbInformation
 End Sub
-
-

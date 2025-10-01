@@ -54,7 +54,7 @@ Sub GenerateAllRICs()
         .Range("D1").Value = "Type"
         .Range("E1").Value = "Month Code"
         .Range("F1").Value = "Year"
-        .Range("G1").Value = "Check Existence"
+        .Range("G1").Value = "Underlying"
         .Range("H1").Value = "Processed"  ' New column for tracking processing status
         .Range("A1:H1").Font.Bold = True
         .Range("A1:H1").Interior.Color = RGB(200, 200, 200)
@@ -646,7 +646,7 @@ Function SetupRICListSheetForChain() As Worksheet
         .Range("D1").Value = "Type"
         .Range("E1").Value = "Month Code"
         .Range("F1").Value = "Year"
-        .Range("G1").Value = "Check Existence"
+        .Range("G1").Value = "Underlying"
         .Range("H1").Value = "Processed"
         .Range("A1:H1").Font.Bold = True
         .Range("A1:H1").Interior.Color = RGB(200, 200, 200)
@@ -853,6 +853,8 @@ Function GetPutCallFromTRResult(chainSheet As Worksheet, rowNum As Long) As Stri
         GetPutCallFromTRResult = ""
     End If
 End Function
+
+
 
 
 
