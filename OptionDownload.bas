@@ -1,4 +1,3 @@
-Attribute VB_Name = "OptionDownload"
 ' ============================================
 ' MODULE 1: Global Configuration and Types
 ' ============================================
@@ -457,32 +456,76 @@ NextRIC:
     ShowBatchSummaryFromRICList startRow, endRow
 End Sub
 
+' Helper function to build VLOOKUP formula for underlying spot price
+Function BuildSpotVLOOKUPFormula(rowNum As Long, underlyingTicker As String) As String
+    ' Build VLOOKUP formula to get spot price from SHEET_FUTURE based on date in column A
+    ' Returns formula that looks up the underlying's price column
+    BuildSpotVLOOKUPFormula = "=IFERROR(INDEX('" & SHEET_FUTURE & "'!GetUnderlyingPriceColumn(""" & underlyingTicker & """),MATCH(A" & rowNum & ",'" & SHEET_FUTURE & "'!GetUnderlyingDateColumn(""" & underlyingTicker & """),1)),"""")"
+End Function
+
 ' New helper function to pre-populate Greek formulas for all 300 rows
 Sub PrePopulateGreekFormulas(ws As Worksheet, startRow As Long, maxRows As Long, _
                              strike As Double, optType As String, maturity As Date, ricRowRef As Long, underlyingTicker As String, optionRic As String)
     Dim i As Long
     Dim endRow As Long
-    Dim callPutFlag As String
     Dim spot As Double
     Dim rate As Double
-    Dim timeToExp As Double
+    'Dim timeToExp As Double
+    Dim wsFuture As Worksheet
+    Dim underlyingCol As Long
+    Dim startCol As Long
+    Dim startRowFuture As Long
+    Dim currentCol As Long
+    Dim foundUnderlying As String
+    Dim rfrRange As Range
+    Dim rfrRow As Long
+    Dim rfrCol As Long
+    Dim rfrLastRow As Long
 
+    ' Get latest spot and rate for validation purposes only
     spot = GetSpotPrice(underlyingTicker)
     rate = GetRiskFreeRate()
-    timeToExp = Application.Max((maturity - Date) / 365, 0.001)
+    'timeToExp = Application.Max((maturity - Date) / 365, 0.001)
 
     ' Data validation checks
-    If timeToExp < 0 Then Exit Sub
+    'If timeToExp < 0 Then Exit Sub
 
-    Dim moneyness As Double
-    moneyness = strike / spot
-    If moneyness <= 0 Or moneyness > 10 Then Exit Sub
+'    Dim moneyness As Double
+'    moneyness = strike / spot
+'    If moneyness <= 0 Or moneyness > 10 Then Exit Sub
 
-    ' Convert P/C to c/p for functions
-    If optType = "CALL" Then
-        callPutFlag = "C"
-    Else
-        callPutFlag = "P"
+    ' Find the underlying column in SHEET_FUTURE
+    Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
+    On Error Resume Next
+    startCol = wsFuture.Range(RANGE_DOWNLOAD).Column
+    startRowFuture = wsFuture.Range(RANGE_DOWNLOAD).Row
+    On Error GoTo 0
+
+    underlyingCol = 0
+    If startCol > 0 Then
+        currentCol = startCol
+        While currentCol <= 100
+            foundUnderlying = Trim(CStr(wsFuture.Cells(startRowFuture, currentCol).Value))
+            If foundUnderlying = underlyingTicker Then
+                underlyingCol = currentCol
+            End If
+            currentCol = currentCol + 3
+            If wsFuture.Cells(startRowFuture, currentCol).Value = "" And _
+               wsFuture.Cells(startRowFuture, currentCol + 3).Value = "" Then
+            End If
+        Wend
+    End If
+
+    ' Get RFR range position and find last row with data
+    On Error Resume Next
+    Set rfrRange = wsFuture.Range(RANGE_RFR)
+    On Error GoTo 0
+
+    If Not rfrRange Is Nothing Then
+        rfrRow = rfrRange.Row
+        rfrCol = rfrRange.Column
+        ' Find last row in column A (dates) in SHEET_FUTURE
+        rfrLastRow = wsFuture.Cells(wsFuture.Rows.count, 1).End(xlUp).Row
     End If
 
     endRow = startRow + maxRows - 1
@@ -491,8 +534,28 @@ Sub PrePopulateGreekFormulas(ws As Worksheet, startRow As Long, maxRows As Long,
         ' Store metadata
         ws.Cells(i, 3).Value = underlyingTicker & " " & optType & " " & strike
         ws.Cells(i, 4).Value = maturity
-        ws.Cells(i, 5).Value = rate
-        ws.Cells(i, 6).Value = spot
+
+        ' Column E: Interest_rate - VLOOKUP from RFR range with dynamic last row
+        If Not rfrRange Is Nothing Then
+            ws.Cells(i, 5).Formula = "=IFERROR(VLOOKUP(A" & i & ",'" & SHEET_FUTURE & "'!" & _
+                wsFuture.Range(wsFuture.Cells(rfrRow, 1), wsFuture.Cells(rfrLastRow, rfrCol)).Address(False, False) & _
+                "," & rfrCol & ",TRUE),""not found"")"
+        Else
+            ws.Cells(i, 5).Value = "not found"
+        End If
+
+        ' Column F: Spot - VLOOKUP from underlying data
+        If underlyingCol > 0 Then
+            ' Build VLOOKUP formula using the found column position
+            ' Date column is at underlyingCol-1, Price column is at underlyingCol
+            ws.Cells(i, 6).Formula = "=IFERROR(VLOOKUP(A" & i & ",'" & SHEET_FUTURE & "'!" & _
+                wsFuture.Cells(startRowFuture + 2, underlyingCol - 1).Address(False, False) & ":" & _
+                wsFuture.Cells(startRowFuture + 5000, underlyingCol).Address(False, False) & ",2,TRUE),"""")"
+        Else
+            ' Fallback if underlying not found
+            ws.Cells(i, 6).Value = spot
+        End If
+
         ws.Cells(i, 7).Value = strike
         ws.Cells(i, 8).Value = optType
         ws.Cells(i, 15).Value = ricRowRef
@@ -503,85 +566,85 @@ Sub PrePopulateGreekFormulas(ws As Worksheet, startRow As Long, maxRows As Long,
         ws.Cells(i, 20).Value = g_Currency
         ws.Cells(i, 21).Value = 0
 
-        ' IV - Column I (9)
+        ' IV - Column I (9) - Now references E, F, G cells and dynamic timeToExp
         ws.Cells(i, 9).Formula = "=IF(B" & i & "="""",""""," & _
-            "GBlackScholesImpVolBisection(""" & callPutFlag & """," & _
-            spot & "," & strike & "," & timeToExp & "," & _
-            rate & ",0,B" & i & "))"
+            "GBlackScholesImpVolBisection(LOWER(H" & i & ")," & _
+            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
+            "E" & i & ",0,B" & i & "))"
 
         ' Delta - Column J (10)
         ws.Cells(i, 10).Formula = "=IF(B" & i & "="""",""""," & _
-            "GBlackScholesNGreeks(""d"",""" & callPutFlag & """," & _
-            spot & "," & strike & "," & timeToExp & "," & _
-            rate & ",0,I" & i & "))"
+            "GBlackScholesNGreeks(""d"",LOWER(H" & i & ")," & _
+            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
+            "E" & i & ",0,I" & i & "))"
 
         ' Vega - Column K (11)
         ws.Cells(i, 11).Formula = "=IF(B" & i & "="""",""""," & _
-            "GBlackScholesNGreeks(""v"",""" & callPutFlag & """," & _
-            spot & "," & strike & "," & timeToExp & "," & _
-            rate & ",0,I" & i & "))"
+            "GBlackScholesNGreeks(""v"",LOWER(H" & i & ")," & _
+            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
+            "E" & i & ",0,I" & i & "))"
 
         ' Gamma - Column L (12)
         ws.Cells(i, 12).Formula = "=IF(B" & i & "="""",""""," & _
-            "GBlackScholesNGreeks(""g"",""" & callPutFlag & """," & _
-            spot & "," & strike & "," & timeToExp & "," & _
-            rate & ",0,I" & i & "))"
+            "GBlackScholesNGreeks(""g"",LOWER(H" & i & ")," & _
+            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
+            "E" & i & ",0,I" & i & "))"
 
         ' Theta - Column M (13)
         ws.Cells(i, 13).Formula = "=IF(B" & i & "="""",""""," & _
-            "GBlackScholesNGreeks(""t"",""" & callPutFlag & """," & _
-            spot & "," & strike & "," & timeToExp & "," & _
-            rate & ",0,I" & i & "))"
+            "GBlackScholesNGreeks(""t"",LOWER(H" & i & ")," & _
+            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
+            "E" & i & ",0,I" & i & "))"
 
         ' Rho - Column N (14)
         ws.Cells(i, 14).Formula = "=IF(B" & i & "="""",""""," & _
-            "GBlackScholesNGreeks(""r"",""" & callPutFlag & """," & _
-            spot & "," & strike & "," & timeToExp & "," & _
-            rate & ",0,I" & i & "))"
+            "GBlackScholesNGreeks(""r"",LOWER(H" & i & ")," & _
+            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
+            "E" & i & ",0,I" & i & "))"
 
         ' DDELTA_DSPOT removed - columns shifted up by 1
 
         ' DDELTA/DVOL - Column V (22)
         ws.Cells(i, 22).Formula = "=IF(B" & i & "="""",""""," & _
-            "CGBlackScholes(""dddv"",""" & callPutFlag & """," & _
-            spot & "," & strike & "," & timeToExp & "," & _
-            rate & ",0,I" & i & ",J" & i & "))"
+            "CGBlackScholes(""dddv"",LOWER(H" & i & ")," & _
+            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
+            "E" & i & ",0,I" & i & ",J" & i & "))"
 
         ' DDELTA/DVOLDVOL - Column W (23)
         ws.Cells(i, 23).Formula = "=IF(B" & i & "="""",""""," & _
-            "CGBlackScholes(""dvv"",""" & callPutFlag & """," & _
-            spot & "," & strike & "," & timeToExp & "," & _
-            rate & ",0,I" & i & ",J" & i & "))"
+            "CGBlackScholes(""dvv"",LOWER(H" & i & ")," & _
+            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
+            "E" & i & ",0,I" & i & ",J" & i & "))"
 
         ' Charm - Column X (24)
         ws.Cells(i, 24).Formula = "=IF(B" & i & "="""",""""," & _
-            "CGBlackScholes(""dt"",""" & callPutFlag & """," & _
-            spot & "," & strike & "," & timeToExp & "," & _
-            rate & ",0,I" & i & ",J" & i & "))"
+            "CGBlackScholes(""dt"",LOWER(H" & i & ")," & _
+            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
+            "E" & i & ",0,I" & i & ",J" & i & "))"
 
         ' DGamma/DSpot - Column Y (25)
         ws.Cells(i, 25).Formula = "=IF(B" & i & "="""",""""," & _
-            "CGBlackScholes(""gps"",""" & callPutFlag & """," & _
-            spot & "," & strike & "," & timeToExp & "," & _
-            rate & ",0,I" & i & ",J" & i & "))"
+            "CGBlackScholes(""gps"",LOWER(H" & i & ")," & _
+            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
+            "E" & i & ",0,I" & i & ",J" & i & "))"
 
         ' Zomma - Column Z (26)
         ws.Cells(i, 26).Formula = "=IF(B" & i & "="""",""""," & _
-            "CGBlackScholes(""gpv"",""" & callPutFlag & """," & _
-            spot & "," & strike & "," & timeToExp & "," & _
-            rate & ",0,I" & i & ",J" & i & "))"
+            "CGBlackScholes(""gpv"",LOWER(H" & i & ")," & _
+            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
+            "E" & i & ",0,I" & i & ",J" & i & "))"
 
         ' Vomma - Column AA (27)
         ws.Cells(i, 27).Formula = "=IF(B" & i & "="""",""""," & _
-            "CGBlackScholes(""dvdv"",""" & callPutFlag & """," & _
-            spot & "," & strike & "," & timeToExp & "," & _
-            rate & ",0,I" & i & ",J" & i & "))"
+            "CGBlackScholes(""dvdv"",LOWER(H" & i & ")," & _
+            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
+            "E" & i & ",0,I" & i & ",J" & i & "))"
 
         ' Ultima - Column AB (28)
         ws.Cells(i, 28).Formula = "=IF(B" & i & "="""",""""," & _
-            "CGBlackScholes(""vvv"",""" & callPutFlag & """," & _
-            spot & "," & strike & "," & timeToExp & "," & _
-            rate & ",0,I" & i & ",J" & i & "))"
+            "CGBlackScholes(""vvv"",LOWER(H" & i & ")," & _
+            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
+            "E" & i & ",0,I" & i & ",J" & i & "))"
     Next i
 End Sub
 
@@ -1458,3 +1521,7 @@ Sub ExportToCSV()
 
     MsgBox "Data exported to: " & csvPath, vbInformation
 End Sub
+
+
+
+
