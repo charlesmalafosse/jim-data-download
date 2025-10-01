@@ -24,6 +24,7 @@ Public g_CurrentMaturity As Date
 Public g_CurrentStrike As Double
 Public g_CurrentType As String
 Public g_BatchSize As Integer
+Public g_BatchCounter As Long  ' Track batch number for auto-save
 
 ' Sheet Names
 Public Const SHEET_CONFIG As String = "Config"
@@ -308,34 +309,38 @@ Sub ProcessAllBatchesFromRICList()
     Dim batchEnd As Long
     Dim continueProcess As Boolean
     Dim response As Integer
-    
+
     Set ws = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
     lastRow = ws.Cells(ws.Rows.count, "A").End(xlUp).Row
-    
+
     continueProcess = True
     currentRow = 2  ' Start after header
-    
+    g_BatchCounter = 0  ' Initialize batch counter
+
     ' Process in batches
     While currentRow <= lastRow And continueProcess
         ' Find batch of unprocessed RICs
         batchStart = FindNextUnprocessedRIC(currentRow)
         If batchStart = 0 Then Exit Sub  ' No more unprocessed RICs
-        
+
         batchEnd = Application.Min(batchStart + g_BatchSize - 1, lastRow)
-        
+
         ' Get batch info for display
         Dim batchMaturity As Date
         Dim batchType As String
         Dim batchStrikeMin As Double
         Dim batchStrikeMax As Double
-        
+
         batchMaturity = ws.Cells(batchStart, 2).Value  ' Column B: Maturity
         batchType = ws.Cells(batchStart, 4).Value      ' Column D: Type
         batchStrikeMin = ws.Cells(batchStart, 3).Value ' Column C: Strike
         batchStrikeMax = ws.Cells(batchEnd, 3).Value   ' Column C: Strike
-        
+
+        ' Increment batch counter
+        g_BatchCounter = g_BatchCounter + 1
+
         ' Show batch details
-        response = MsgBox("Process batch:" & vbNewLine & _
+        response = MsgBox("Process batch #" & g_BatchCounter & ":" & vbNewLine & _
                          "Rows: " & batchStart & " to " & batchEnd & vbNewLine & _
                          vbNewLine & "Continue?", vbYesNo + vbQuestion, "Batch Processing")
 '                         "Maturity: " & Format(batchMaturity, "mmm-yyyy") & vbNewLine & _
@@ -347,13 +352,20 @@ Sub ProcessAllBatchesFromRICList()
             continueProcess = False
             Exit Sub
         End If
-        
+
         ' Mark batch as processing
         MarkBatchStatus batchStart, batchEnd, "Processing"
-        
+
         ' Process the batch
         ProcessBatchFromRICList batchStart, batchEnd
-        
+
+        ' Save Excel workbook every 3 batches
+        If g_BatchCounter Mod 3 = 0 Then
+            Application.StatusBar = "Saving workbook (batch " & g_BatchCounter & ")..."
+            ThisWorkbook.Save
+            Application.StatusBar = "Workbook saved. Batch " & g_BatchCounter & " complete."
+        End If
+
         ' Update to next position
         currentRow = batchEnd + 1
     Wend
@@ -450,6 +462,9 @@ NextRIC:
 
         ' Calculate all formulas after everything is set
         Application.Calculate
+
+        ' Auto-save staging to CSV after each batch
+        SaveStagingToCSV g_BatchCounter
     End If
 
     ' Show batch summary
@@ -1520,6 +1535,47 @@ Sub ExportToCSV()
     ActiveWorkbook.Close False
 
     MsgBox "Data exported to: " & csvPath, vbInformation
+End Sub
+
+' Auto-save staging to CSV after each batch (silent, no popup)
+Sub SaveStagingToCSV(Optional batchNumber As Long = 0)
+    Dim stagingWs As Worksheet
+    Dim csvPath As String
+    Dim fileName As String
+    Dim rowCount As Long
+
+    On Error GoTo ErrorHandler
+
+    Set stagingWs = ThisWorkbook.Worksheets(SHEET_STAGING)
+
+    ' Check if staging has data (more than just header row)
+    rowCount = stagingWs.Cells(stagingWs.Rows.Count, 1).End(xlUp).Row
+    If rowCount <= 1 Then Exit Sub
+
+    ' Build filename with batch number if provided
+    If batchNumber > 0 Then
+        fileName = g_UnderlyingTicker & "_" & Format(Date, "yyyymmdd_HHmmss") & "_batch" & batchNumber & ".csv"
+    Else
+        fileName = g_UnderlyingTicker & "_" & Format(Date, "yyyymmdd_HHmmss") & ".csv"
+    End If
+
+    csvPath = ThisWorkbook.Path & "\" & fileName
+
+    ' Save without prompts
+    Application.DisplayAlerts = False
+    stagingWs.Copy
+    ActiveWorkbook.SaveAs fileName:=csvPath, FileFormat:=xlCSV
+    ActiveWorkbook.Close False
+    Application.DisplayAlerts = True
+
+    ' Log to status bar instead of popup
+    Application.StatusBar = "Auto-saved: " & fileName & " (" & rowCount - 1 & " rows)"
+
+    Exit Sub
+
+ErrorHandler:
+    Application.DisplayAlerts = True
+    Application.StatusBar = "Error saving CSV: " & Err.Description
 End Sub
 
 
