@@ -101,9 +101,9 @@ Sub GenerateAllRICs()
     
     
     ' Refresh the chain data
-    DoEvents
-    Application.Run "WorkspaceRefreshWorksheet", True, 120000, SHEET_RIC_LIST
-    DoEvents
+    Dim wsRIC As Worksheet
+    Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
+    RefreshLSEGWithTimeout wsRIC, 120
     
     MsgBox "Generated " & ricList.count & " RICs!" & vbNewLine & _
            "Check '" & SHEET_RIC_LIST & "' sheet for details." & vbNewLine & _
@@ -469,9 +469,7 @@ Sub DownloadFromChain()
     Application.StatusBar = "Downloading option chain of chains for " & rootRIC & "..."
 
     ' Refresh the chain data
-    DoEvents
-    Application.Run "WorkspaceRefreshWorksheet", True, 120000, chainSheet.Name
-    DoEvents
+    RefreshLSEGWithTimeout chainSheet, 120
 
     ' Wait for refresh to complete
     Application.Wait Now + TimeValue("00:00:05")
@@ -592,9 +590,7 @@ NextChainRIC:
     Next i
     
     ' Call Worksheet refresh
-    DoEvents
-    Application.Run "WorkspaceRefreshWorksheet", True, 120000, chainSheet.Name
-    DoEvents
+    RefreshLSEGWithTimeout chainSheet, 120
 
     ' Wait for all TR formulas to refresh
     Application.StatusBar = "Waiting for data refresh..."

@@ -1,3 +1,4 @@
+Attribute VB_Name = "OptionDownload"
 ' ============================================
 ' MODULE 1: Global Configuration and Types
 ' ============================================
@@ -67,23 +68,13 @@ End Type
 ' ============================================
 
 Sub RefreshFutureSheet()
-    On Error GoTo ErrorHandler
+    Dim wsFuture As Worksheet
+    Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
 
-    Application.StatusBar = "Refreshing LSEG Future data..."
-
-    DoEvents
-    Application.Run "WorkspaceRefreshWorksheet", True, 120000, SHEET_FUTURE
-    DoEvents
-
-    Application.Wait Now + TimeValue("00:00:02")
+    RefreshLSEGWithTimeout wsFuture, 120
 
     MsgBox "Double check data in : " & SHEET_FUTURE, vbExclamation
 
-    Application.StatusBar = False
-    Exit Sub
-
-ErrorHandler:
-    MsgBox "Error refreshing data: " & Err.Description, vbExclamation
     Application.StatusBar = False
 End Sub
 
@@ -218,12 +209,7 @@ Sub RefreshFutureUnderlyings()
         Next underlying
 
         ' Step 6: Refresh LSEG workspace
-        Application.StatusBar = "Refreshing LSEG Future data..."
-        DoEvents
-        Application.Run "WorkspaceRefreshWorksheet", True, 120000, SHEET_FUTURE
-        DoEvents
-
-        Application.Wait Now + TimeValue("00:00:03")
+        RefreshLSEGWithTimeout wsFuture, 120
 
         MsgBox "Added " & missingUnderlyings.count & " underlyings to SHEET_FUTURE." & vbNewLine & _
                "Data refresh complete. Please verify the downloaded data.", vbInformation
@@ -412,7 +398,7 @@ Sub ProcessBatchFromRICList(startRow As Long, endRow As Long)
 
         ' Store metadata in same row
         wsCollection.Cells(currentRow, 7).Value = wsRIC.Cells(i, 3).Value  ' Strike
-        wsCollection.Cells(currentRow, 8).Value = wsRIC.Cells(i, 4).Value  ' Type
+        wsCollection.Cells(currentRow, 8).Value = Left(wsRIC.Cells(i, 4).Value, 1) ' Type
         wsCollection.Cells(currentRow, 4).Value = wsRIC.Cells(i, 2).Value  ' Maturity
 
         ' Store RIC reference for tracking
@@ -437,7 +423,7 @@ NextRIC:
     ' Only refresh if there's data to process
     If formulaCount > 0 Then
         ' Refresh LSEG data
-        RefreshCollectionSheet
+        RefreshLSEGCollectionSheet
 
         ' Wait for refresh to complete
         Application.Wait Now + TimeValue("00:00:05")
@@ -1004,23 +990,38 @@ End Function
 ' Keep existing refresh and calculation functions
 ' ============================================
 
-Sub RefreshCollectionSheet()
-    On Error GoTo ErrorHandler
+Sub RefreshLSEGCollectionSheet()
+    Dim wsCollection As Worksheet
+    Set wsCollection = ThisWorkbook.Worksheets(SHEET_COLLECTION)
+    ' @@@@ TO REACTIVATE AFTER TESTING
+    ' RefreshLSEGWithTimeout wsCollection, 120
     
-    Application.StatusBar = "Refreshing LSEG data..."
-    
-    DoEvents
-    Application.Run "WorkspaceRefreshWorksheet", True, 120000, SHEET_COLLECTION
-    DoEvents
-    
-    Application.Wait Now + TimeValue("00:00:02")
-    
+    'FAKE DATA @@@
+    CopyFakeDownloadToDataCollection
+
     Application.StatusBar = False
-    Exit Sub
+End Sub
+
+Sub CopyFakeDownloadToDataCollection()
+    Dim wsSrc As Worksheet
+    Dim wsDst As Worksheet
+    Dim lastRow As Long
     
-ErrorHandler:
-    MsgBox "Error refreshing data: " & Err.Description, vbExclamation
-    Application.StatusBar = False
+    ' Set references
+    Set wsSrc = ThisWorkbook.Sheets("FAKE_DOWNLOAD")
+    Set wsDst = ThisWorkbook.Sheets("Data Collection")
+    
+    ' Find last used row in source (col A)
+    lastRow = wsSrc.Cells(wsSrc.Rows.count, "A").End(xlUp).Row
+    
+    ' Clear destination columns A & B first (optional)
+    wsDst.Range("A:B").ClearContents
+    
+    ' Copy values from FAKE_DOWNLOAD to Data Collection
+    wsSrc.Range("A1:B" & lastRow).Copy
+    wsDst.Range("A1").PasteSpecial xlPasteValues
+    
+    Application.CutCopyMode = False
 End Sub
 
 Sub CalculateGreeks(ws As Worksheet, startRow As Long, endRow As Long)
@@ -1408,3 +1409,5 @@ Sub ExportToCSV()
 
     MsgBox "Data exported to: " & csvPath, vbInformation
 End Sub
+
+

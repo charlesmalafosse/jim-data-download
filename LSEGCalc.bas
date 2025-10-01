@@ -37,13 +37,13 @@ Sub RefreshLSEGWithTimeout(ws As Worksheet, Optional timeoutSeconds As Long = 12
                                Format(Timer - startTime, "0") & " seconds"
     Loop
     
-    Application.Calculation = xlCalculationAutomatic
+    'Application.Calculation = xlCalculationAutomatic
     Application.StatusBar = ws.Name & " refresh completed"
     Exit Sub
     
 RefreshError:
     Application.SendKeys "{ESC}"
-    Application.Calculation = xlCalculationAutomatic
+    'Application.Calculation = xlCalculationAutomatic
     Application.StatusBar = ws.Name & " refresh interrupted"
 End Sub
 
