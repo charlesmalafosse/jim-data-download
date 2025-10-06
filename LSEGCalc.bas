@@ -1,10 +1,15 @@
 Attribute VB_Name = "LSEGCalc"
 Option Explicit
 
+
 Sub RefreshLSEGWithTimeout(ws As Worksheet, Optional timeoutSeconds As Long = 120)
     Dim startTime As Double
+    Dim originalCalcMode As XlCalculation
     
     startTime = Timer
+    
+    ' Store original calculation mode
+    originalCalcMode = Application.Calculation
     
     Application.StatusBar = "Refreshing LSEG data for " & ws.Name & "..."
     DoEvents
@@ -12,14 +17,15 @@ Sub RefreshLSEGWithTimeout(ws As Worksheet, Optional timeoutSeconds As Long = 12
     ' Clear any pending operations
     Application.SendKeys "{ESC}"
     Application.Wait Now + TimeValue("0:00:01")
+    DoEvents  ' Ensure events are processed after wait
     
     On Error GoTo RefreshError
     
-    ' Start refresh in a way we can interrupt
+    ' Set to manual calculation for the refresh
     Application.Calculation = xlCalculationManual
     
     ' Attempt the refresh
-    Application.Run "WorkspaceRefreshWorksheet", True, timeoutSeconds * 1000, ws
+    Application.Run "WorkspaceRefreshWorksheet", True, timeoutSeconds * 1000, ws.Name
     
     ' Poll for completion with escape mechanism
     Do While Application.CalculationState <> xlDone
@@ -37,13 +43,29 @@ Sub RefreshLSEGWithTimeout(ws As Worksheet, Optional timeoutSeconds As Long = 12
                                Format(Timer - startTime, "0") & " seconds"
     Loop
     
-    'Application.Calculation = xlCalculationAutomatic
-    Application.StatusBar = ws.Name & " refresh completed"
+    ' Restore original calculation mode
+    Application.Calculation = originalCalcMode
+    
+    ' Force recalculation of the worksheet
+    Application.StatusBar = "Calculating " & ws.Name & "..."
+    DoEvents
+    ws.Calculate
+    
+    Application.StatusBar = ws.Name & " refresh and calculation completed"
     Exit Sub
     
 RefreshError:
     Application.SendKeys "{ESC}"
-    'Application.Calculation = xlCalculationAutomatic
-    Application.StatusBar = ws.Name & " refresh interrupted"
+    DoEvents
+    
+    ' Restore original calculation mode even on error
+    Application.Calculation = originalCalcMode
+    
+    ' Still try to calculate the worksheet even if refresh had issues
+    On Error Resume Next
+    ws.Calculate
+    On Error GoTo 0
+    
+    Application.StatusBar = ws.Name & " refresh interrupted (calculation attempted)"
 End Sub
 

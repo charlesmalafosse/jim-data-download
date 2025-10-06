@@ -260,45 +260,62 @@ End Sub
 
 Sub MainDownloadProcess()
     Dim response As Integer
-    
+    Dim totalRICs As Long
+
+    Application.StatusBar = "Initializing workbook..."
     ' Initialize
     InitializeWorkbook
-    
+
+    Application.StatusBar = "Loading configuration..."
     ' Load configuration
     If Not LoadConfiguration() Then
         MsgBox "Please complete configuration in Config sheet", vbExclamation
+        Application.StatusBar = False
         Exit Sub
     End If
-    
+
+    Application.StatusBar = "Checking RIC list..."
     ' Check if RIC_List has data
     If Not CheckRICListExists() Then
         MsgBox "Please run GenerateAllRICs first to create the RIC list!", vbExclamation
+        Application.StatusBar = False
         Exit Sub
     End If
-    
+
+    totalRICs = CountUnprocessedRICs()
+
     ' Show summary
     response = MsgBox("Starting download for: " & g_UnderlyingTicker & vbNewLine & _
                      "Date Range: " & g_DateStart & " to " & g_DateEnd & vbNewLine & _
-                     "RICs to process: " & CountUnprocessedRICs() & vbNewLine & _
+                     "RICs to process: " & totalRICs & vbNewLine & _
                      vbNewLine & "Continue?", vbYesNo + vbQuestion)
-    
-    If response = vbNo Then Exit Sub
 
+    If response = vbNo Then
+        Application.StatusBar = False
+        Exit Sub
+    End If
+
+    Application.StatusBar = "Checking underlying data availability..."
     ' Check Underlying data
     If Not CheckUnderlyings() Then
         MsgBox "Process stopped: Missing underlying futures data." & vbNewLine & _
                "Please download the missing underlyings first before processing options.", _
                vbExclamation, "Missing Underlyings"
+        Application.StatusBar = False
         Exit Sub
     End If
 
+    Application.StatusBar = "Starting batch processing for " & totalRICs & " RICs..."
     ' Start batch processing
     ProcessAllBatchesFromRICList
-    
+
+    Application.StatusBar = "Generating quality report..."
     ' Generate final report
     GenerateQualityReport
-    
+
+    Application.StatusBar = "Process complete!"
     MsgBox "Process Complete! Check Quality Report for summary.", vbInformation
+    Application.StatusBar = False
 End Sub
 
 Sub ProcessAllBatchesFromRICList()
@@ -385,6 +402,7 @@ Sub ProcessBatchFromRICList(startRow As Long, endRow As Long)
     Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
     Set wsCollection = ThisWorkbook.Worksheets(SHEET_COLLECTION)
 
+    Application.StatusBar = "Batch #" & g_BatchCounter & ": Clearing collection sheet..."
     ' Clear collection sheet
     ClearCollectionSheet
 
@@ -394,12 +412,19 @@ Sub ProcessBatchFromRICList(startRow As Long, endRow As Long)
     successCount = 0
     errorCount = 0
 
+    Application.StatusBar = "Batch #" & g_BatchCounter & ": Setting up formulas for " & (endRow - startRow + 1) & " RICs..."
+
     For i = startRow To endRow
         ric = wsRIC.Cells(i, 1).Value  ' Column A: RIC
 
         ' Skip if already processed successfully
         If wsRIC.Cells(i, 8).Value = "Yes" Then  ' Column H: Processed
             GoTo NextRIC
+        End If
+
+        ' Update status every 10 RICs
+        If formulaCount Mod 10 = 0 Then
+            Application.StatusBar = "Batch #" & g_BatchCounter & ": Preparing RIC " & (formulaCount + 1) & " of " & (endRow - startRow + 1) & " - " & ric
         End If
 
         ' Calculate row position with spacing
@@ -437,38 +462,54 @@ NextRIC:
 
     ' Only refresh if there's data to process
     If formulaCount > 0 Then
+        Application.StatusBar = "Batch #" & g_BatchCounter & ": Refreshing LSEG data for " & formulaCount & " RICs (this may take a few minutes)..."
         ' Refresh LSEG data
         RefreshLSEGCollectionSheet
 
+        Application.StatusBar = "Batch #" & g_BatchCounter & ": Waiting for data refresh to complete..."
         ' Wait for refresh to complete
         Application.Wait Now + TimeValue("00:00:05")
-        
+
+        Application.StatusBar = "Batch #" & g_BatchCounter & ": Calculating Greeks formulas..."
         ' Recompute Formulas
         wsCollection.Calculate
-        
 
+
+        Application.StatusBar = "Batch #" & g_BatchCounter & ": Copying data to staging..."
         ' Process each formula result (they're spaced every 300 rows)
         ' Now we only need to copy rows with actual data
         Dim processRow As Long
         For i = 0 To formulaCount - 1
             processRow = 2 + (i * ROW_SPACING)
 
+            ' Update status every 5 RICs during copy
+            If i Mod 5 = 0 Then
+                Application.StatusBar = "Batch #" & g_BatchCounter & ": Copying to staging (" & (i + 1) & "/" & formulaCount & ")..."
+            End If
+
             ' Copy only rows that have LSEG data to staging
             CopyDataRowsToStaging wsCollection, processRow, ROW_SPACING
         Next i
 
+        Application.StatusBar = "Batch #" & g_BatchCounter & ": Validating data quality..."
         ' Validate and update RIC_List with results
         ValidateAndUpdateRICListWithSpacing wsCollection, formulaCount
 
+        Application.StatusBar = "Batch #" & g_BatchCounter & ": Final calculations..."
         ' Calculate all formulas after everything is set
         Application.Calculate
 
+        Application.StatusBar = "Batch #" & g_BatchCounter & ": Saving to CSV..."
         ' Auto-save staging to CSV after each batch
         SaveStagingToCSV g_BatchCounter
     End If
 
+    Application.StatusBar = "Batch #" & g_BatchCounter & ": Complete! Showing summary..."
     ' Show batch summary
     ShowBatchSummaryFromRICList startRow, endRow
+
+    ' Clear status bar after summary
+    Application.StatusBar = False
 End Sub
 
 ' Helper function to build VLOOKUP formula for underlying spot price
