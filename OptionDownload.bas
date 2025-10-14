@@ -1,3 +1,4 @@
+Attribute VB_Name = "OptionDownload"
 ' ============================================
 ' MODULE 1: Global Configuration and Types
 ' ============================================
@@ -25,6 +26,22 @@ Public g_CurrentStrike As Double
 Public g_CurrentType As String
 Public g_BatchSize As Integer
 Public g_BatchCounter As Long  ' Track batch number for auto-save
+
+' OnTime Chain State Management
+Public Enum BatchProcessState
+    bpsIdle = 0
+    bpsSetupFormulas = 1
+    bpsRefreshing = 2
+    bpsProcessingResults = 3
+End Enum
+
+Public g_BatchState As BatchProcessState
+Public g_BatchStartRow As Long
+Public g_BatchEndRow As Long
+Public g_FormulaCount As Long
+Public g_StopRequested As Boolean
+Public g_NextScheduledProc As String
+Public g_RefreshCheckCount As Long
 
 ' Sheet Names
 Public Const SHEET_CONFIG As String = "Config"
@@ -73,7 +90,7 @@ Sub RefreshFutureSheet()
     Dim wsFuture As Worksheet
     Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
 
-    RefreshLSEGWithTimeout wsFuture, 120
+    RefreshLSEGWithTimeout wsFuture, 60
 
     MsgBox "Double check data in : " & SHEET_FUTURE, vbExclamation
 
@@ -306,210 +323,333 @@ Sub MainDownloadProcess()
     End If
 
     Application.StatusBar = "Starting batch processing for " & totalRICs & " RICs..."
-    ' Start batch processing
+
+    ' Start batch processing chain
+    ' NOTE: This triggers async OnTime chain - quality report generated at end by ProcessBatch_Complete
     ProcessAllBatchesFromRICList
 
-    Application.StatusBar = "Generating quality report..."
-    ' Generate final report
-    GenerateQualityReport
-
-    Application.StatusBar = "Process complete!"
-    MsgBox "Process Complete! Check Quality Report for summary.", vbInformation
-    Application.StatusBar = False
+    ' VBA execution ends here - OnTime chain runs asynchronously
 End Sub
+
+' ============================================
+' Batch Processing with OnTime Chain Architecture
+' ============================================
+' This uses Application.OnTime to break VBA execution between phases,
+' allowing LSEG add-in to populate data asynchronously.
+'
+' Flow: ProcessAllBatches → SetupFormulas → [OnTime] → CheckRefresh
+'       → ProcessResults → TriggerNext → [loop back to SetupFormulas]
+'
+' To stop processing: Run StopBatchProcessing() or press ESC during dialogs
+' ============================================
 
 Sub ProcessAllBatchesFromRICList()
     Dim ws As Worksheet
     Dim lastRow As Long
-    Dim currentRow As Long
     Dim batchStart As Long
     Dim batchEnd As Long
-    Dim continueProcess As Boolean
-    Dim response As Integer
 
     Set ws = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
     lastRow = ws.Cells(ws.Rows.count, "A").End(xlUp).Row
 
-    continueProcess = True
-    currentRow = 2  ' Start after header
-    g_BatchCounter = 0  ' Initialize batch counter
+    ' Initialize
+    g_BatchCounter = 0
+    g_StopRequested = False
+    g_BatchState = bpsIdle
 
-    ' Process in batches
-    While currentRow <= lastRow And continueProcess
-        ' Find batch of unprocessed RICs
-        batchStart = FindNextUnprocessedRIC(currentRow)
-        If batchStart = 0 Then Exit Sub  ' No more unprocessed RICs
+    ' Find first unprocessed batch
+    batchStart = FindNextUnprocessedRIC(2)
+    If batchStart = 0 Then
+        MsgBox "No unprocessed RICs found!", vbInformation
+        Exit Sub
+    End If
 
-        batchEnd = Application.Min(batchStart + g_BatchSize - 1, lastRow)
+    batchEnd = Application.Min(batchStart + g_BatchSize - 1, lastRow)
 
-        ' Get batch info for display
-        Dim batchMaturity As Date
-        Dim batchType As String
-        Dim batchStrikeMin As Double
-        Dim batchStrikeMax As Double
+    ' Increment counter
+    g_BatchCounter = g_BatchCounter + 1
 
-        batchMaturity = ws.Cells(batchStart, 2).Value  ' Column B: Maturity
-        batchType = ws.Cells(batchStart, 4).Value      ' Column D: Type
-        batchStrikeMin = ws.Cells(batchStart, 3).Value ' Column C: Strike
-        batchStrikeMax = ws.Cells(batchEnd, 3).Value   ' Column C: Strike
+    ' Save batch range and trigger chain
+    g_BatchStartRow = batchStart
+    g_BatchEndRow = batchEnd
 
-        ' Increment batch counter
-        g_BatchCounter = g_BatchCounter + 1
+    ' Mark as processing
+    MarkBatchStatus batchStart, batchEnd, "Processing"
 
-        ' Show batch details
-        response = MsgBox("Process batch #" & g_BatchCounter & ":" & vbNewLine & _
-                         "Rows: " & batchStart & " to " & batchEnd & vbNewLine & _
-                         vbNewLine & "Continue?", vbYesNo + vbQuestion, "Batch Processing")
-'                         "Maturity: " & Format(batchMaturity, "mmm-yyyy") & vbNewLine & _
-'                         "Type: " & batchType & vbNewLine & _
-'                         "Strikes: " & batchStrikeMin & " to " & batchStrikeMax & vbNewLine & _
-'                         "RICs: " & (batchEnd - batchStart + 1) & vbNewLine & _
-
-        If response = vbNo Then
-            continueProcess = False
-            Exit Sub
-        End If
-
-        ' Mark batch as processing
-        MarkBatchStatus batchStart, batchEnd, "Processing"
-
-        ' Process the batch
-        ProcessBatchFromRICList batchStart, batchEnd
-
-        ' Save Excel workbook every 3 batches
-        If g_BatchCounter Mod 3 = 0 Then
-            Application.StatusBar = "Saving workbook (batch " & g_BatchCounter & ")..."
-            ThisWorkbook.Save
-            Application.StatusBar = "Workbook saved. Batch " & g_BatchCounter & " complete."
-        End If
-
-        ' Update to next position
-        currentRow = batchEnd + 1
-    Wend
+    ' Start the chain
+    ProcessBatch_SetupFormulas
 End Sub
 
-Sub ProcessBatchFromRICList(startRow As Long, endRow As Long)
+' ============================================
+' PHASE 1: Setup Formulas and Trigger Refresh
+' ============================================
+Sub ProcessBatch_SetupFormulas()
     Dim wsRIC As Worksheet
     Dim wsCollection As Worksheet
     Dim i As Long
     Dim ric As String
     Dim currentRow As Long
-    Dim formulaCount As Long
-    Dim successCount As Long
-    Dim errorCount As Long
-    Const ROW_SPACING As Long = 300  ' Space between formulas
+    Const ROW_SPACING As Long = 300
 
+    ' Check stop flag
+    If g_StopRequested Then
+        ProcessBatch_Abort
+        Exit Sub
+    End If
+
+    g_BatchState = bpsSetupFormulas
     Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
     Set wsCollection = ThisWorkbook.Worksheets(SHEET_COLLECTION)
 
     Application.StatusBar = "Batch #" & g_BatchCounter & ": Clearing collection sheet..."
-    ' Clear collection sheet
     ClearCollectionSheet
 
-    ' Setup formulas for this batch with spacing
+    ' Setup formulas
     currentRow = 2
-    formulaCount = 0
-    successCount = 0
-    errorCount = 0
+    g_FormulaCount = 0
 
-    Application.StatusBar = "Batch #" & g_BatchCounter & ": Setting up formulas for " & (endRow - startRow + 1) & " RICs..."
+    Application.StatusBar = "Batch #" & g_BatchCounter & ": Setting up formulas..."
 
-    For i = startRow To endRow
-        ric = wsRIC.Cells(i, 1).Value  ' Column A: RIC
+    For i = g_BatchStartRow To g_BatchEndRow
+        ric = wsRIC.Cells(i, 1).Value
 
-        ' Skip if already processed successfully
-        If wsRIC.Cells(i, 8).Value = "Yes" Then  ' Column H: Processed
-            GoTo NextRIC
+        ' Skip if already processed
+        If wsRIC.Cells(i, 8).Value = "Yes" Then GoTo NextRIC
+
+        ' Update status
+        If g_FormulaCount Mod 10 = 0 Then
+            Application.StatusBar = "Batch #" & g_BatchCounter & ": Preparing RIC " & (g_FormulaCount + 1) & " - " & ric
         End If
 
-        ' Update status every 10 RICs
-        If formulaCount Mod 10 = 0 Then
-            Application.StatusBar = "Batch #" & g_BatchCounter & ": Preparing RIC " & (formulaCount + 1) & " of " & (endRow - startRow + 1) & " - " & ric
-        End If
+        currentRow = 2 + (g_FormulaCount * ROW_SPACING)
 
-        ' Calculate row position with spacing
-        ' Every formula gets placed 300 rows apart
-        currentRow = 2 + (formulaCount * ROW_SPACING)
-
-        ' Setup formula in collection sheet
+        ' Setup formula
         wsCollection.Cells(currentRow, 1).Formula = BuildRHistoryFormula(ric, g_DateStart, g_DateEnd)
 
-        ' Store metadata in same row
-        wsCollection.Cells(currentRow, 7).Value = wsRIC.Cells(i, 3).Value  ' Strike
-        wsCollection.Cells(currentRow, 8).Value = Left(wsRIC.Cells(i, 4).Value, 1) ' Type
-        wsCollection.Cells(currentRow, 4).Value = wsRIC.Cells(i, 2).Value  ' Maturity
-
-        ' Store RIC reference for tracking
-        wsCollection.Cells(currentRow, 15).Value = i  ' Store row reference in RIC_List
-
-        ' Also store the RIC itself for reference
+        ' Store metadata
+        wsCollection.Cells(currentRow, 7).Value = wsRIC.Cells(i, 3).Value
+        wsCollection.Cells(currentRow, 8).Value = Left(wsRIC.Cells(i, 4).Value, 1)
+        wsCollection.Cells(currentRow, 4).Value = wsRIC.Cells(i, 2).Value
+        wsCollection.Cells(currentRow, 15).Value = i
         wsCollection.Cells(currentRow, 16).Value = ric
 
-        ' Pre-populate Greek formulas for all 300 rows in this section
-        ' This ensures formulas are ready before LSEG refresh
+        ' Pre-populate Greek formulas
         PrePopulateGreekFormulas wsCollection, currentRow, ROW_SPACING, _
                                  wsRIC.Cells(i, 3).Value, _
                                  wsRIC.Cells(i, 4).Value, _
                                  wsRIC.Cells(i, 2).Value, _
-                                 i, _
-                                 wsRIC.Cells(i, 7).Value, _
-                                 ric
+                                 i, wsRIC.Cells(i, 7).Value, ric
 
-        formulaCount = formulaCount + 1
+        g_FormulaCount = g_FormulaCount + 1
 
 NextRIC:
     Next i
 
-    ' Only refresh if there's data to process
-    If formulaCount > 0 Then
-        Application.StatusBar = "Batch #" & g_BatchCounter & ": Refreshing LSEG data for " & formulaCount & " RICs (this may take a few minutes)..."
-        ' Refresh LSEG data
+    ' Only proceed if there's data
+    If g_FormulaCount > 0 Then
+        Application.StatusBar = "Batch #" & g_BatchCounter & ": Refreshing LSEG data for " & g_FormulaCount & " RICs..."
+        g_BatchState = bpsRefreshing
+        g_RefreshCheckCount = 0
+
+        ' Trigger LSEG refresh
         RefreshLSEGCollectionSheet
 
-        Application.StatusBar = "Batch #" & g_BatchCounter & ": Waiting for data refresh to complete..."
-        ' Wait for refresh to complete
-        Application.Wait Now + TimeValue("00:00:05")
+        ' Schedule check after 5 seconds
+        g_NextScheduledProc = "ProcessBatch_CheckRefresh"
+        Application.OnTime Now + TimeValue("00:00:05"), g_NextScheduledProc
+    Else
+        ' No formulas, skip to next batch
+        ProcessBatch_TriggerNext
+    End If
+End Sub
 
-        Application.StatusBar = "Batch #" & g_BatchCounter & ": Calculating Greeks formulas..."
-        ' Recompute Formulas
-        wsCollection.Calculate
+' ============================================
+' PHASE 2: Check if Refresh Complete
+' ============================================
+Sub ProcessBatch_CheckRefresh()
+    Dim wsCollection As Worksheet
 
-
-        Application.StatusBar = "Batch #" & g_BatchCounter & ": Copying data to staging..."
-        ' Process each formula result (they're spaced every 300 rows)
-        ' Now we only need to copy rows with actual data
-        Dim processRow As Long
-        For i = 0 To formulaCount - 1
-            processRow = 2 + (i * ROW_SPACING)
-
-            ' Update status every 5 RICs during copy
-            If i Mod 5 = 0 Then
-                Application.StatusBar = "Batch #" & g_BatchCounter & ": Copying to staging (" & (i + 1) & "/" & formulaCount & ")..."
-            End If
-
-            ' Copy only rows that have LSEG data to staging
-            CopyDataRowsToStaging wsCollection, processRow, ROW_SPACING
-        Next i
-
-        Application.StatusBar = "Batch #" & g_BatchCounter & ": Validating data quality..."
-        ' Validate and update RIC_List with results
-        ValidateAndUpdateRICListWithSpacing wsCollection, formulaCount
-
-        Application.StatusBar = "Batch #" & g_BatchCounter & ": Final calculations..."
-        ' Calculate all formulas after everything is set
-        Application.Calculate
-
-        Application.StatusBar = "Batch #" & g_BatchCounter & ": Saving to CSV..."
-        ' Auto-save staging to CSV after each batch
-        SaveStagingToCSV g_BatchCounter
+    ' Check stop flag
+    If g_StopRequested Then
+        ProcessBatch_Abort
+        Exit Sub
     End If
 
-    Application.StatusBar = "Batch #" & g_BatchCounter & ": Complete! Showing summary..."
-    ' Show batch summary
-    ShowBatchSummaryFromRICList startRow, endRow
+    ' Check timeout
+    g_RefreshCheckCount = g_RefreshCheckCount + 1
+    If g_RefreshCheckCount > 60 Then  ' 60 checks × 3 sec = 3 min timeout
+        MsgBox "LSEG refresh timeout for batch #" & g_BatchCounter & " - proceeding anyway", vbExclamation
+        ProcessBatch_ProcessResults
+        Exit Sub
+    End If
 
-    ' Clear status bar after summary
+    Set wsCollection = ThisWorkbook.Worksheets(SHEET_COLLECTION)
+
+    Application.StatusBar = "Batch #" & g_BatchCounter & ": Checking refresh status (attempt " & g_RefreshCheckCount & ")..."
+
+    ' Check if data ready
+    If IsDataReady(wsCollection) Then
+        ' Data ready, proceed
+        ProcessBatch_ProcessResults
+    Else
+        ' Still waiting, reschedule
+        g_NextScheduledProc = "ProcessBatch_CheckRefresh"
+        Application.OnTime Now + TimeValue("00:00:03"), g_NextScheduledProc
+    End If
+End Sub
+
+' ============================================
+' PHASE 3: Process Results
+' ============================================
+Sub ProcessBatch_ProcessResults()
+    Dim wsCollection As Worksheet
+    Dim i As Long
+    Dim processRow As Long
+    Const ROW_SPACING As Long = 300
+
+    ' Check stop flag
+    If g_StopRequested Then
+        ProcessBatch_Abort
+        Exit Sub
+    End If
+
+    g_BatchState = bpsProcessingResults
+    Set wsCollection = ThisWorkbook.Worksheets(SHEET_COLLECTION)
+
+    Application.StatusBar = "Batch #" & g_BatchCounter & ": Calculating Greeks..."
+    wsCollection.Calculate
+
+    Application.StatusBar = "Batch #" & g_BatchCounter & ": Copying data to staging..."
+    For i = 0 To g_FormulaCount - 1
+        processRow = 2 + (i * ROW_SPACING)
+
+        If i Mod 5 = 0 Then
+            Application.StatusBar = "Batch #" & g_BatchCounter & ": Copying (" & (i + 1) & "/" & g_FormulaCount & ")..."
+        End If
+
+        CopyDataRowsToStaging wsCollection, processRow, ROW_SPACING
+    Next i
+
+    Application.StatusBar = "Batch #" & g_BatchCounter & ": Validating data..."
+    ValidateAndUpdateRICListWithSpacing wsCollection, g_FormulaCount
+
+    Application.StatusBar = "Batch #" & g_BatchCounter & ": Final calculations..."
+    Application.Calculate
+
+    Application.StatusBar = "Batch #" & g_BatchCounter & ": Saving to CSV..."
+    SaveStagingToCSV g_BatchCounter
+
+    ' Save workbook every 3 batches
+    If g_BatchCounter Mod 3 = 0 Then
+        Application.StatusBar = "Saving workbook (batch " & g_BatchCounter & ")..."
+        ThisWorkbook.Save
+    End If
+
+    Application.StatusBar = "Batch #" & g_BatchCounter & ": Complete!"
+    ShowBatchSummaryFromRICList g_BatchStartRow, g_BatchEndRow
+
+    ' Trigger next batch
+    ProcessBatch_TriggerNext
+End Sub
+
+' ============================================
+' PHASE 4: Trigger Next Batch or Complete
+' ============================================
+Sub ProcessBatch_TriggerNext()
+    Dim ws As Worksheet
+    Dim lastRow As Long
+    Dim nextStart As Long
+    Dim nextEnd As Long
+
+    Set ws = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
+    lastRow = ws.Cells(ws.Rows.count, "A").End(xlUp).Row
+
+    ' Find next batch
+    nextStart = FindNextUnprocessedRIC(g_BatchEndRow + 1)
+
+    If nextStart > 0 And nextStart <= lastRow Then
+        ' Found next batch
+        nextEnd = Application.Min(nextStart + g_BatchSize - 1, lastRow)
+        g_BatchCounter = g_BatchCounter + 1
+
+        ' Save new batch range
+        g_BatchStartRow = nextStart
+        g_BatchEndRow = nextEnd
+
+        MarkBatchStatus nextStart, nextEnd, "Processing"
+
+        ' Schedule next batch
+        g_NextScheduledProc = "ProcessBatch_SetupFormulas"
+        Application.OnTime Now + TimeValue("00:00:02"), g_NextScheduledProc
+    Else
+        ' All done
+        ProcessBatch_Complete
+    End If
+End Sub
+
+' ============================================
+' Completion Handler
+' ============================================
+Sub ProcessBatch_Complete()
+    g_BatchState = bpsIdle
+    Application.StatusBar = "All batches complete! Generating quality report..."
+
+    GenerateQualityReport
+
     Application.StatusBar = False
+    MsgBox "All batches processed! Check Quality Report for summary.", vbInformation
+End Sub
+
+' ============================================
+' Helper Functions for OnTime Chain
+' ============================================
+
+' Check if LSEG data has loaded
+Function IsDataReady(ws As Worksheet) As Boolean
+    Dim checkRow As Long
+    Dim readyCount As Long
+    Dim totalChecks As Long
+    Dim cellValue As Variant
+    Dim cellText As String
+    Const ROW_SPACING As Long = 300
+
+    totalChecks = 0
+    readyCount = 0
+
+    ' Check first few formulas (max 5 samples)
+    For checkRow = 2 To 2 + (g_FormulaCount * ROW_SPACING) Step ROW_SPACING
+        totalChecks = totalChecks + 1
+
+        cellValue = ws.Cells(checkRow, 2).Value
+        cellText = CStr(ws.Cells(checkRow, 2).Text)
+
+        ' Check if cell is ready (no longer shows "Refreshing..." and has valid data or empty)
+        If InStr(1, cellText, "Refreshing", vbTextCompare) = 0 Then
+            readyCount = readyCount + 1
+        End If
+
+        If totalChecks >= 5 Then Exit For
+    Next
+
+    ' Consider ready if ALL checked cells are no longer refreshing
+    IsDataReady = (totalChecks > 0 And readyCount = totalChecks)
+End Function
+
+' Stop batch processing
+Sub StopBatchProcessing()
+    g_StopRequested = True
+    Application.StatusBar = "Stop requested - will halt after current operation..."
+    MsgBox "Batch processing will stop after current phase completes.", vbInformation
+End Sub
+
+' Abort handler
+Sub ProcessBatch_Abort()
+    g_BatchState = bpsIdle
+    g_StopRequested = False
+    g_NextScheduledProc = ""
+    Application.StatusBar = False
+    MsgBox "Processing stopped at batch #" & g_BatchCounter & vbNewLine & _
+           "Progress saved in RIC_List sheet.", vbInformation
 End Sub
 
 ' Helper function to build VLOOKUP formula for underlying spot price
@@ -1110,8 +1250,8 @@ Function BuildRHistoryFormula(ric As String, startDate As Date, endDate As Date)
     endNum = CLng(endDate)
     
     BuildRHistoryFormula = "=RHistory(""" & ric & """," & _
-                          """.Timestamp;.Close"",""START:" & startNum & _
-                          " END:" & endNum & " INTERVAL:1D"")"
+                          """.Timestamp;.Close"",""START:" & Format(startNum, "yyyy-mm-dd") & _
+                          " END:" & Format(endNum, "yyyy-mm-dd") & " INTERVAL:1D"")"
 End Function
 
 ' ============================================
@@ -1121,11 +1261,11 @@ End Function
 Sub RefreshLSEGCollectionSheet()
     Dim wsCollection As Worksheet
     Set wsCollection = ThisWorkbook.Worksheets(SHEET_COLLECTION)
-    ' @@@@ TO REACTIVATE AFTER TESTING
-    ' RefreshLSEGWithTimeout wsCollection, 120
+    'LSEG Download
+    RefreshLSEGWithTimeout wsCollection, 60
     
     'FAKE DATA @@@
-    CopyFakeDownloadToDataCollection
+    'CopyFakeDownloadToDataCollection
 
     Application.StatusBar = False
 End Sub
@@ -1549,12 +1689,13 @@ Function CheckUnderlyings() As Boolean
             reportMsg = reportMsg & "  " & underlying & vbNewLine
         Next underlying
         reportMsg = reportMsg & vbNewLine
+        MsgBox reportMsg, vbInformation, "Underlyings Check Results"
     Else
         reportMsg = reportMsg & "All underlyings are available in SHEET_FUTURE!"
     End If
 
     Application.StatusBar = False
-    MsgBox reportMsg, vbInformation, "Underlyings Check Results"
+    'MsgBox reportMsg, vbInformation, "Underlyings Check Results"
 
     ' Return True if all underlyings are available, False if some are missing
     CheckUnderlyings = (missingUnderlyings.count = 0)
@@ -1590,7 +1731,7 @@ Sub SaveStagingToCSV(Optional batchNumber As Long = 0)
     Set stagingWs = ThisWorkbook.Worksheets(SHEET_STAGING)
 
     ' Check if staging has data (more than just header row)
-    rowCount = stagingWs.Cells(stagingWs.Rows.Count, 1).End(xlUp).Row
+    rowCount = stagingWs.Cells(stagingWs.Rows.count, 1).End(xlUp).Row
     If rowCount <= 1 Then Exit Sub
 
     ' Build filename with batch number if provided
@@ -1618,6 +1759,8 @@ ErrorHandler:
     Application.DisplayAlerts = True
     Application.StatusBar = "Error saving CSV: " & Err.Description
 End Sub
+
+
 
 
 

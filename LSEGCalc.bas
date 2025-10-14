@@ -15,7 +15,7 @@ Sub RefreshLSEGWithTimeout(ws As Worksheet, Optional timeoutSeconds As Long = 12
     DoEvents
     
     ' Clear any pending operations
-    Application.SendKeys "{ESC}"
+    'Application.SendKeys "{ESC}"
     Application.Wait Now + TimeValue("0:00:01")
     DoEvents  ' Ensure events are processed after wait
     
@@ -55,7 +55,7 @@ Sub RefreshLSEGWithTimeout(ws As Worksheet, Optional timeoutSeconds As Long = 12
     Exit Sub
     
 RefreshError:
-    Application.SendKeys "{ESC}"
+    'Application.SendKeys "{ESC}"
     DoEvents
     
     ' Restore original calculation mode even on error
