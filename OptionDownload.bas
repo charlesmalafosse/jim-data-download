@@ -337,8 +337,8 @@ End Sub
 ' This uses Application.OnTime to break VBA execution between phases,
 ' allowing LSEG add-in to populate data asynchronously.
 '
-' Flow: ProcessAllBatches → SetupFormulas → [OnTime] → CheckRefresh
-'       → ProcessResults → TriggerNext → [loop back to SetupFormulas]
+' Flow: ProcessAllBatches ? SetupFormulas ? [OnTime] ? CheckRefresh
+'       ? ProcessResults ? TriggerNext ? [loop back to SetupFormulas]
 '
 ' To stop processing: Run StopBatchProcessing() or press ESC during dialogs
 ' ============================================
@@ -401,8 +401,9 @@ Sub ProcessBatch_SetupFormulas()
     Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
     Set wsCollection = ThisWorkbook.Worksheets(SHEET_COLLECTION)
 
-    Application.StatusBar = "Batch #" & g_BatchCounter & ": Clearing collection sheet..."
+    Application.StatusBar = "Batch #" & g_BatchCounter & ": Clearing collection and staging sheets..."
     ClearCollectionSheet
+    ClearStagingSheet
 
     ' Setup formulas
     currentRow = 2
@@ -433,8 +434,8 @@ Sub ProcessBatch_SetupFormulas()
         wsCollection.Cells(currentRow, 15).Value = i
         wsCollection.Cells(currentRow, 16).Value = ric
 
-        ' Pre-populate Greek formulas
-        PrePopulateGreekFormulas wsCollection, currentRow, ROW_SPACING, _
+        ' Setup metadata only (Greek formulas added after refresh)
+        SetupRHistoryAndMetadata wsCollection, currentRow, ROW_SPACING, _
                                  wsRIC.Cells(i, 3).Value, _
                                  wsRIC.Cells(i, 4).Value, _
                                  wsRIC.Cells(i, 2).Value, _
@@ -477,7 +478,7 @@ Sub ProcessBatch_CheckRefresh()
 
     ' Check timeout
     g_RefreshCheckCount = g_RefreshCheckCount + 1
-    If g_RefreshCheckCount > 60 Then  ' 60 checks × 3 sec = 3 min timeout
+    If g_RefreshCheckCount > 60 Then  ' 60 checks ? 3 sec = 3 min timeout
         MsgBox "LSEG refresh timeout for batch #" & g_BatchCounter & " - proceeding anyway", vbExclamation
         ProcessBatch_ProcessResults
         Exit Sub
@@ -516,9 +517,28 @@ Sub ProcessBatch_ProcessResults()
     g_BatchState = bpsProcessingResults
     Set wsCollection = ThisWorkbook.Worksheets(SHEET_COLLECTION)
 
+    ' Add Greek formulas to rows with data (after LSEG refresh)
+    Application.StatusBar = "Batch #" & g_BatchCounter & ": Adding Greek formulas to data rows..."
+    For i = 0 To g_FormulaCount - 1
+        processRow = 2 + (i * ROW_SPACING)
+        AddGreekFormulasToDataRows wsCollection, processRow, ROW_SPACING
+    Next i
+
     Application.StatusBar = "Batch #" & g_BatchCounter & ": Calculating Greeks..."
     wsCollection.Calculate
-
+    ' Wait for calculation to complete
+    Dim calcTimeout As Long
+    calcTimeout = 0
+    Do While Application.CalculationState <> xlDone
+        DoEvents
+        Application.Wait Now + TimeValue("00:00:01")  ' Wait 1 second
+        calcTimeout = calcTimeout + 1
+        
+'        If calcTimeout > 30 Then  ' 30 second timeout
+'            MsgBox "Calculation timeout - proceeding anyway", vbExclamation
+'            Exit Do
+'        End If
+    Loop
     Application.StatusBar = "Batch #" & g_BatchCounter & ": Copying data to staging..."
     For i = 0 To g_FormulaCount - 1
         processRow = 2 + (i * ROW_SPACING)
@@ -533,8 +553,8 @@ Sub ProcessBatch_ProcessResults()
     Application.StatusBar = "Batch #" & g_BatchCounter & ": Validating data..."
     ValidateAndUpdateRICListWithSpacing wsCollection, g_FormulaCount
 
-    Application.StatusBar = "Batch #" & g_BatchCounter & ": Final calculations..."
-    Application.Calculate
+    'Application.StatusBar = "Batch #" & g_BatchCounter & ": Final calculations..."
+    'Application.Calculate
 
     Application.StatusBar = "Batch #" & g_BatchCounter & ": Saving to CSV..."
     SaveStagingToCSV g_BatchCounter
@@ -623,8 +643,8 @@ Function IsDataReady(ws As Worksheet) As Boolean
         cellValue = ws.Cells(checkRow, 2).Value
         cellText = CStr(ws.Cells(checkRow, 2).Text)
 
-        ' Check if cell is ready (no longer shows "Refreshing..." and has valid data or empty)
-        If InStr(1, cellText, "Refreshing", vbTextCompare) = 0 Then
+        ' Check if cell is ready (no longer shows "Retrieving..." and has valid data or empty)
+        If InStr(1, cellText, "Retrieving...", vbTextCompare) = 0 Then
             readyCount = readyCount + 1
         End If
 
@@ -659,14 +679,11 @@ Function BuildSpotVLOOKUPFormula(rowNum As Long, underlyingTicker As String) As 
     BuildSpotVLOOKUPFormula = "=IFERROR(INDEX('" & SHEET_FUTURE & "'!GetUnderlyingPriceColumn(""" & underlyingTicker & """),MATCH(A" & rowNum & ",'" & SHEET_FUTURE & "'!GetUnderlyingDateColumn(""" & underlyingTicker & """),1)),"""")"
 End Function
 
-' New helper function to pre-populate Greek formulas for all 300 rows
-Sub PrePopulateGreekFormulas(ws As Worksheet, startRow As Long, maxRows As Long, _
+' New optimized approach: Setup minimal metadata before LSEG refresh
+Sub SetupRHistoryAndMetadata(ws As Worksheet, startRow As Long, maxRows As Long, _
                              strike As Double, optType As String, maturity As Date, ricRowRef As Long, underlyingTicker As String, optionRic As String)
     Dim i As Long
     Dim endRow As Long
-    Dim spot As Double
-    Dim rate As Double
-    'Dim timeToExp As Double
     Dim wsFuture As Worksheet
     Dim underlyingCol As Long
     Dim startCol As Long
@@ -677,18 +694,6 @@ Sub PrePopulateGreekFormulas(ws As Worksheet, startRow As Long, maxRows As Long,
     Dim rfrRow As Long
     Dim rfrCol As Long
     Dim rfrLastRow As Long
-
-    ' Get latest spot and rate for validation purposes only
-    spot = GetSpotPrice(underlyingTicker)
-    rate = GetRiskFreeRate()
-    'timeToExp = Application.Max((maturity - Date) / 365, 0.001)
-
-    ' Data validation checks
-    'If timeToExp < 0 Then Exit Sub
-
-'    Dim moneyness As Double
-'    moneyness = strike / spot
-'    If moneyness <= 0 Or moneyness > 10 Then Exit Sub
 
     ' Find the underlying column in SHEET_FUTURE
     Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
@@ -720,12 +725,12 @@ Sub PrePopulateGreekFormulas(ws As Worksheet, startRow As Long, maxRows As Long,
     If Not rfrRange Is Nothing Then
         rfrRow = rfrRange.Row
         rfrCol = rfrRange.Column
-        ' Find last row in column A (dates) in SHEET_FUTURE
         rfrLastRow = wsFuture.Cells(wsFuture.Rows.count, 1).End(xlUp).Row
     End If
 
     endRow = startRow + maxRows - 1
 
+    ' Setup basic metadata and VLOOKUP formulas (NO Greek formulas yet)
     For i = startRow To endRow
         ' Store metadata
         ws.Cells(i, 3).Value = underlyingTicker & " " & optType & " " & strike
@@ -742,18 +747,16 @@ Sub PrePopulateGreekFormulas(ws As Worksheet, startRow As Long, maxRows As Long,
 
         ' Column F: Spot - VLOOKUP from underlying data
         If underlyingCol > 0 Then
-            ' Build VLOOKUP formula using the found column position
-            ' Date column is at underlyingCol-1, Price column is at underlyingCol
             ws.Cells(i, 6).Formula = "=IFERROR(VLOOKUP(A" & i & ",'" & SHEET_FUTURE & "'!" & _
                 wsFuture.Cells(startRowFuture + 2, underlyingCol - 1).Address(False, False) & ":" & _
                 wsFuture.Cells(startRowFuture + 5000, underlyingCol).Address(False, False) & ",2,TRUE),"""")"
         Else
-            ' Fallback if underlying not found
-            ws.Cells(i, 6).Value = spot
+            ws.Cells(i, 6).Value = GetSpotPrice(underlyingTicker)
         End If
 
+        ' Store additional metadata
         ws.Cells(i, 7).Value = strike
-        ws.Cells(i, 8).Value = optType
+        ws.Cells(i, 8).Value = Left(optType, 1)
         ws.Cells(i, 15).Value = ricRowRef
         ws.Cells(i, 16).Value = optionRic
         ws.Cells(i, 17).Value = g_LotSize
@@ -761,89 +764,112 @@ Sub PrePopulateGreekFormulas(ws As Worksheet, startRow As Long, maxRows As Long,
         ws.Cells(i, 19).Value = underlyingTicker
         ws.Cells(i, 20).Value = g_Currency
         ws.Cells(i, 21).Value = 0
-
-        ' IV - Column I (9) - Now references E, F, G cells and dynamic timeToExp
-        ws.Cells(i, 9).Formula = "=IF(B" & i & "="""",""""," & _
-            "GBlackScholesImpVolBisection(LOWER(H" & i & ")," & _
-            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
-            "E" & i & ",0,B" & i & "))"
-
-        ' Delta - Column J (10)
-        ws.Cells(i, 10).Formula = "=IF(B" & i & "="""",""""," & _
-            "GBlackScholesNGreeks(""d"",LOWER(H" & i & ")," & _
-            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
-            "E" & i & ",0,I" & i & "))"
-
-        ' Vega - Column K (11)
-        ws.Cells(i, 11).Formula = "=IF(B" & i & "="""",""""," & _
-            "GBlackScholesNGreeks(""v"",LOWER(H" & i & ")," & _
-            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
-            "E" & i & ",0,I" & i & "))"
-
-        ' Gamma - Column L (12)
-        ws.Cells(i, 12).Formula = "=IF(B" & i & "="""",""""," & _
-            "GBlackScholesNGreeks(""g"",LOWER(H" & i & ")," & _
-            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
-            "E" & i & ",0,I" & i & "))"
-
-        ' Theta - Column M (13)
-        ws.Cells(i, 13).Formula = "=IF(B" & i & "="""",""""," & _
-            "GBlackScholesNGreeks(""t"",LOWER(H" & i & ")," & _
-            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
-            "E" & i & ",0,I" & i & "))"
-
-        ' Rho - Column N (14)
-        ws.Cells(i, 14).Formula = "=IF(B" & i & "="""",""""," & _
-            "GBlackScholesNGreeks(""r"",LOWER(H" & i & ")," & _
-            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
-            "E" & i & ",0,I" & i & "))"
-
-        ' DDELTA_DSPOT removed - columns shifted up by 1
-
-        ' DDELTA/DVOL - Column V (22)
-        ws.Cells(i, 22).Formula = "=IF(B" & i & "="""",""""," & _
-            "CGBlackScholes(""dddv"",LOWER(H" & i & ")," & _
-            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
-            "E" & i & ",0,I" & i & ",J" & i & "))"
-
-        ' DDELTA/DVOLDVOL - Column W (23)
-        ws.Cells(i, 23).Formula = "=IF(B" & i & "="""",""""," & _
-            "CGBlackScholes(""dvv"",LOWER(H" & i & ")," & _
-            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
-            "E" & i & ",0,I" & i & ",J" & i & "))"
-
-        ' Charm - Column X (24)
-        ws.Cells(i, 24).Formula = "=IF(B" & i & "="""",""""," & _
-            "CGBlackScholes(""dt"",LOWER(H" & i & ")," & _
-            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
-            "E" & i & ",0,I" & i & ",J" & i & "))"
-
-        ' DGamma/DSpot - Column Y (25)
-        ws.Cells(i, 25).Formula = "=IF(B" & i & "="""",""""," & _
-            "CGBlackScholes(""gps"",LOWER(H" & i & ")," & _
-            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
-            "E" & i & ",0,I" & i & ",J" & i & "))"
-
-        ' Zomma - Column Z (26)
-        ws.Cells(i, 26).Formula = "=IF(B" & i & "="""",""""," & _
-            "CGBlackScholes(""gpv"",LOWER(H" & i & ")," & _
-            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
-            "E" & i & ",0,I" & i & ",J" & i & "))"
-
-        ' Vomma - Column AA (27)
-        ws.Cells(i, 27).Formula = "=IF(B" & i & "="""",""""," & _
-            "CGBlackScholes(""dvdv"",LOWER(H" & i & ")," & _
-            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
-            "E" & i & ",0,I" & i & ",J" & i & "))"
-
-        ' Ultima - Column AB (28)
-        ws.Cells(i, 28).Formula = "=IF(B" & i & "="""",""""," & _
-            "CGBlackScholes(""vvv"",LOWER(H" & i & ")," & _
-            "F" & i & ",G" & i & ",(D" & i & "-A" & i & ")/365," & _
-            "E" & i & ",0,I" & i & ",J" & i & "))"
     Next i
 End Sub
 
+' Add Greek formulas ONLY to rows with premium data (after LSEG refresh)
+Sub AddGreekFormulasToDataRows(ws As Worksheet, startRow As Long, maxRows As Long)
+    Dim i As Long
+    Dim endRow As Long
+    Dim firstDataRow As Long
+    Dim lastDataRow As Long
+    Dim rowCount As Long
+    Dim formulaRange As Range
+    Dim originalCalcMode As XlCalculation
+
+    ' Save original calculation mode
+    originalCalcMode = Application.Calculation
+
+    ' Disable screen updating and calculation for speed
+    'Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+    'Application.EnableEvents = False
+
+    On Error GoTo CleanUp
+
+    endRow = startRow + maxRows - 1
+    firstDataRow = 0
+    lastDataRow = 0
+
+    ' Find first and last rows with premium data
+    For i = startRow To endRow
+        If Not IsEmpty(ws.Cells(i, 1).Value) And Not IsEmpty(ws.Cells(i, 2).Value) Then
+            If firstDataRow = 0 Then firstDataRow = i
+            lastDataRow = i
+        ElseIf firstDataRow > 0 Then
+            Exit For ' No more data
+        End If
+    Next i
+
+    ' Exit if no data found
+    If firstDataRow = 0 Or lastDataRow = 0 Then GoTo CleanUp
+
+    rowCount = lastDataRow - firstDataRow + 1
+
+    ' Use R1C1 notation for relative formulas - much faster!
+    ' Add Greek formulas to the data range only
+
+    ' Column I (9): Implied Volatility
+    ws.Range(ws.Cells(firstDataRow, 9), ws.Cells(lastDataRow, 9)).FormulaR1C1 = _
+        "=IF(RC[-7]="""","""",GBlackScholesImpVolBisection(LOWER(RC[-1]),RC[-3],RC[-2],(RC[-5]-RC[-8])/365,RC[-4],0,RC[-7]))"
+
+    ' Column J (10): Delta
+    ws.Range(ws.Cells(firstDataRow, 10), ws.Cells(lastDataRow, 10)).FormulaR1C1 = _
+        "=IF(RC[-8]="""","""",GBlackScholesNGreeks(""d"",LOWER(RC[-2]),RC[-4],RC[-3],(RC[-6]-RC[-9])/365,RC[-5],0,RC[-1]))"
+
+    ' Column K (11): Vega
+    ws.Range(ws.Cells(firstDataRow, 11), ws.Cells(lastDataRow, 11)).FormulaR1C1 = _
+        "=IF(RC[-9]="""","""",GBlackScholesNGreeks(""v"",LOWER(RC[-3]),RC[-5],RC[-4],(RC[-7]-RC[-10])/365,RC[-6],0,RC[-2]))"
+
+    ' Column L (12): Gamma
+    ws.Range(ws.Cells(firstDataRow, 12), ws.Cells(lastDataRow, 12)).FormulaR1C1 = _
+        "=IF(RC[-10]="""","""",GBlackScholesNGreeks(""g"",LOWER(RC[-4]),RC[-6],RC[-5],(RC[-8]-RC[-11])/365,RC[-7],0,RC[-3]))"
+
+    ' Column M (13): Theta
+    ws.Range(ws.Cells(firstDataRow, 13), ws.Cells(lastDataRow, 13)).FormulaR1C1 = _
+        "=IF(RC[-11]="""","""",GBlackScholesNGreeks(""t"",LOWER(RC[-5]),RC[-7],RC[-6],(RC[-9]-RC[-12])/365,RC[-8],0,RC[-4]))"
+
+    ' Column N (14): Rho
+    ws.Range(ws.Cells(firstDataRow, 14), ws.Cells(lastDataRow, 14)).FormulaR1C1 = _
+        "=IF(RC[-12]="""","""",GBlackScholesNGreeks(""r"",LOWER(RC[-6]),RC[-8],RC[-7],(RC[-10]-RC[-13])/365,RC[-9],0,RC[-5]))"
+
+    ' Column V (22): DDELTA/DVOL
+    ws.Range(ws.Cells(firstDataRow, 22), ws.Cells(lastDataRow, 22)).FormulaR1C1 = _
+        "=IF(RC[-20]="""","""",CGBlackScholes(""dddv"",LOWER(RC[-14]),RC[-16],RC[-15],(RC[-18]-RC[-21])/365,RC[-17],0,RC[-13],RC[-12]))"
+
+    ' Column W (23): DDELTA/DVOLDVOL
+    ws.Range(ws.Cells(firstDataRow, 23), ws.Cells(lastDataRow, 23)).FormulaR1C1 = _
+        "=IF(RC[-21]="""","""",CGBlackScholes(""dvv"",LOWER(RC[-15]),RC[-17],RC[-16],(RC[-19]-RC[-22])/365,RC[-18],0,RC[-14],RC[-13]))"
+
+    ' Column X (24): Charm (DDELTA/DTIME)
+    ws.Range(ws.Cells(firstDataRow, 24), ws.Cells(lastDataRow, 24)).FormulaR1C1 = _
+        "=IF(RC[-22]="""","""",CGBlackScholes(""dt"",LOWER(RC[-16]),RC[-18],RC[-17],(RC[-20]-RC[-23])/365,RC[-19],0,RC[-15],RC[-14]))"
+
+    ' Column Y (25): DGamma/DSpot
+    ws.Range(ws.Cells(firstDataRow, 25), ws.Cells(lastDataRow, 25)).FormulaR1C1 = _
+        "=IF(RC[-23]="""","""",CGBlackScholes(""gps"",LOWER(RC[-17]),RC[-19],RC[-18],(RC[-21]-RC[-24])/365,RC[-20],0,RC[-16],RC[-15]))"
+
+    ' Column Z (26): Zomma (DGAMMA/DVOL)
+    ws.Range(ws.Cells(firstDataRow, 26), ws.Cells(lastDataRow, 26)).FormulaR1C1 = _
+        "=IF(RC[-24]="""","""",CGBlackScholes(""gpv"",LOWER(RC[-18]),RC[-20],RC[-19],(RC[-22]-RC[-25])/365,RC[-21],0,RC[-17],RC[-16]))"
+
+    ' Column AA (27): Vomma (DVEGA/DVOL)
+    ws.Range(ws.Cells(firstDataRow, 27), ws.Cells(lastDataRow, 27)).FormulaR1C1 = _
+        "=IF(RC[-25]="""","""",CGBlackScholes(""dvdv"",LOWER(RC[-19]),RC[-21],RC[-20],(RC[-23]-RC[-26])/365,RC[-22],0,RC[-18],RC[-17]))"
+
+    ' Column AB (28): Ultima (DVEGA/DVOLDVOL)
+    ws.Range(ws.Cells(firstDataRow, 28), ws.Cells(lastDataRow, 28)).FormulaR1C1 = _
+        "=IF(RC[-26]="""","""",CGBlackScholes(""vvv"",LOWER(RC[-20]),RC[-22],RC[-21],(RC[-24]-RC[-27])/365,RC[-23],0,RC[-19],RC[-18]))"
+
+    ' Calculate the worksheet to populate formulas
+    'ws.Calculate
+
+CleanUp:
+    ' Re-enable Excel features and restore original calculation mode
+    'Application.ScreenUpdating = True
+    Application.Calculation = originalCalcMode
+    'Application.EnableEvents = True
+End Sub
 
 ' New function to copy only rows with LSEG data to staging
 Sub CopyDataRowsToStaging(ws As Worksheet, startRow As Long, maxRows As Long)
@@ -863,33 +889,34 @@ Sub CopyDataRowsToStaging(ws As Worksheet, startRow As Long, maxRows As Long)
             NextRow = wsDest.Cells(wsDest.Rows.count, 1).End(xlUp).Row + 1
 
             ' Map columns to staging sheet (matching CSV export format)
-            wsDest.Cells(NextRow, 1).Value = ws.Cells(i, 1).Value   ' Spot_Date
-            wsDest.Cells(NextRow, 2).Value = ws.Cells(i, 2).Value   ' Premium
-            wsDest.Cells(NextRow, 3).Value = ws.Cells(i, 3).Value   ' Ticker
-            wsDest.Cells(NextRow, 4).Value = ws.Cells(i, 4).Value   ' Maturity
-            wsDest.Cells(NextRow, 5).Value = ws.Cells(i, 5).Value   ' Interest_rate
-            wsDest.Cells(NextRow, 6).Value = ws.Cells(i, 6).Value   ' Spot
-            wsDest.Cells(NextRow, 7).Value = ws.Cells(i, 7).Value   ' Strike
-            wsDest.Cells(NextRow, 8).Value = ws.Cells(i, 8).Value   ' Type
-            wsDest.Cells(NextRow, 9).Value = ws.Cells(i, 9).Value   ' Implied_Volatility
-            wsDest.Cells(NextRow, 10).Value = ws.Cells(i, 10).Value ' Delta
-            wsDest.Cells(NextRow, 11).Value = ws.Cells(i, 11).Value ' Vega
-            wsDest.Cells(NextRow, 12).Value = ws.Cells(i, 12).Value ' Gamma
-            wsDest.Cells(NextRow, 13).Value = ws.Cells(i, 13).Value ' Theta
-            wsDest.Cells(NextRow, 14).Value = ws.Cells(i, 14).Value ' Rho
-            wsDest.Cells(NextRow, 15).Value = ws.Cells(i, 17).Value ' Lot_size (from col Q)
-            wsDest.Cells(NextRow, 16).Value = ws.Cells(i, 18).Value ' Name
-            wsDest.Cells(NextRow, 17).Value = ws.Cells(i, 19).Value ' Reference
-            wsDest.Cells(NextRow, 18).Value = ws.Cells(i, 20).Value ' ccy_pair
-            wsDest.Cells(NextRow, 19).Value = ws.Cells(i, 21).Value ' Dividend
+            ' Use .Value2 to preserve full numeric precision without formatting
+            wsDest.Cells(NextRow, 1).Value2 = ws.Cells(i, 1).Value2   ' Spot_Date
+            wsDest.Cells(NextRow, 2).Value2 = ws.Cells(i, 2).Value2   ' Premium
+            wsDest.Cells(NextRow, 3).Value2 = ws.Cells(i, 3).Value2   ' Ticker
+            wsDest.Cells(NextRow, 4).Value2 = ws.Cells(i, 4).Value2   ' Maturity
+            wsDest.Cells(NextRow, 5).Value2 = ws.Cells(i, 5).Value2   ' Interest_rate
+            wsDest.Cells(NextRow, 6).Value2 = ws.Cells(i, 6).Value2   ' Spot
+            wsDest.Cells(NextRow, 7).Value2 = ws.Cells(i, 7).Value2   ' Strike
+            wsDest.Cells(NextRow, 8).Value2 = ws.Cells(i, 8).Value2   ' Type
+            wsDest.Cells(NextRow, 9).Value2 = ws.Cells(i, 9).Value2   ' Implied_Volatility
+            wsDest.Cells(NextRow, 10).Value2 = ws.Cells(i, 10).Value2 ' Delta
+            wsDest.Cells(NextRow, 11).Value2 = ws.Cells(i, 11).Value2 ' Vega
+            wsDest.Cells(NextRow, 12).Value2 = ws.Cells(i, 12).Value2 ' Gamma
+            wsDest.Cells(NextRow, 13).Value2 = ws.Cells(i, 13).Value2 ' Theta
+            wsDest.Cells(NextRow, 14).Value2 = ws.Cells(i, 14).Value2 ' Rho
+            wsDest.Cells(NextRow, 15).Value2 = ws.Cells(i, 17).Value2 ' Lot_size (from col Q)
+            wsDest.Cells(NextRow, 16).Value2 = ws.Cells(i, 18).Value2 ' Name
+            wsDest.Cells(NextRow, 17).Value2 = ws.Cells(i, 19).Value2 ' Reference
+            wsDest.Cells(NextRow, 18).Value2 = ws.Cells(i, 20).Value2 ' ccy_pair
+            wsDest.Cells(NextRow, 19).Value2 = ws.Cells(i, 21).Value2 ' Dividend
             ' DDELTA_DSPOT removed - columns shifted
-            wsDest.Cells(NextRow, 20).Value = ws.Cells(i, 22).Value ' DDELTA_DVOL (from col V)
-            wsDest.Cells(NextRow, 21).Value = ws.Cells(i, 23).Value ' DDELTA_DVOLDVOL (from col W)
-            wsDest.Cells(NextRow, 22).Value = ws.Cells(i, 24).Value ' DDELTA_DTIME (from col X)
-            wsDest.Cells(NextRow, 23).Value = ws.Cells(i, 25).Value ' DGAMMA_DSPOT (from col Y)
-            wsDest.Cells(NextRow, 24).Value = ws.Cells(i, 26).Value ' DGAMMA_DVOL (from col Z)
-            wsDest.Cells(NextRow, 25).Value = ws.Cells(i, 27).Value ' DVEGA_DVOL (from col AA)
-            wsDest.Cells(NextRow, 26).Value = ws.Cells(i, 28).Value ' DVEGA_DVOLDVOL (from col AB)
+            wsDest.Cells(NextRow, 20).Value2 = ws.Cells(i, 22).Value2 ' DDELTA_DVOL (from col V)
+            wsDest.Cells(NextRow, 21).Value2 = ws.Cells(i, 23).Value2 ' DDELTA_DVOLDVOL (from col W)
+            wsDest.Cells(NextRow, 22).Value2 = ws.Cells(i, 24).Value2 ' DDELTA_DTIME (from col X)
+            wsDest.Cells(NextRow, 23).Value2 = ws.Cells(i, 25).Value2 ' DGAMMA_DSPOT (from col Y)
+            wsDest.Cells(NextRow, 24).Value2 = ws.Cells(i, 26).Value2 ' DGAMMA_DVOL (from col Z)
+            wsDest.Cells(NextRow, 25).Value2 = ws.Cells(i, 27).Value2 ' DVEGA_DVOL (from col AA)
+            wsDest.Cells(NextRow, 26).Value2 = ws.Cells(i, 28).Value2 ' DVEGA_DVOLDVOL (from col AB)
         Else
             ' No more data in this section
             Exit For
@@ -1198,12 +1225,12 @@ Sub ShowBatchSummaryFromRICList(startRow As Long, endRow As Long)
         End If
     Next i
     
-    MsgBox "Batch Complete!" & vbNewLine & vbNewLine & _
-          "Rows processed: " & startRow & " to " & endRow & vbNewLine & _
-          "Successful: " & successCount & vbNewLine & _
-          "Errors: " & errorCount & vbNewLine & _
-          "Skipped: " & (endRow - startRow + 1 - successCount - errorCount), _
-          vbInformation, "Batch Summary"
+'    MsgBox "Batch Complete!" & vbNewLine & vbNewLine & _
+'          "Rows processed: " & startRow & " to " & endRow & vbNewLine & _
+'          "Successful: " & successCount & vbNewLine & _
+'          "Errors: " & errorCount & vbNewLine & _
+'          "Skipped: " & (endRow - startRow + 1 - successCount - errorCount), _
+'          vbInformation, "Batch Summary"
 End Sub
 
 ' ============================================
@@ -1541,6 +1568,27 @@ Sub ClearCollectionSheet()
     ws.Range("AB1").Value = "DVEGA/DVOLDVOL"
 
     ws.Range("A1:AB1").Font.Bold = True
+
+    ' Format column A (Spot_Date) as Short Date (day/month/year) to ensure proper date formatting from LSEG formulas
+    ws.Columns("A:A").NumberFormat = "d/m/yyyy"
+
+    ' Format column D (Maturity) as Short Date
+    ws.Columns("D:D").NumberFormat = "d/m/yyyy"
+End Sub
+
+Sub ClearStagingSheet()
+    Dim ws As Worksheet
+    Dim lastRow As Long
+
+    Set ws = ThisWorkbook.Worksheets(SHEET_STAGING)
+
+    ' Find last row with data
+    lastRow = ws.Cells(ws.Rows.count, 1).End(xlUp).Row
+
+    ' Clear all data rows (keep header row)
+    If lastRow > 1 Then
+        ws.Rows("2:" & lastRow).ClearContents
+    End If
 End Sub
 
 Sub SetupStagingSheet()
@@ -1576,6 +1624,19 @@ Sub SetupStagingSheet()
     ws.Range("Z1").Value = "DVEGA/DVOLDVOL"
 
     ws.Range("A1:Z1").Font.Bold = True
+
+    ' Format date columns to d/m/yyyy
+    ws.Columns("A:A").NumberFormat = "d/m/yyyy"  ' Spot_Date
+    ws.Columns("D:D").NumberFormat = "d/m/yyyy"  ' Maturity
+
+    ' Format numeric columns with sufficient decimal places for full precision
+    ws.Columns("B:B").NumberFormat = "General"   ' Premium
+    ws.Columns("E:E").NumberFormat = "General"   ' Interest_rate
+    ws.Columns("F:F").NumberFormat = "General"   ' Spot
+    ws.Columns("G:G").NumberFormat = "General"   ' Strike
+    ws.Columns("I:N").NumberFormat = "General"   ' Greeks (IV, Delta, Vega, Gamma, Theta, Rho)
+    ws.Columns("S:S").NumberFormat = "General"   ' Dividend
+    ws.Columns("T:Z").NumberFormat = "General"   ' Higher-order Greeks
 End Sub
 
 Sub SetupQualitySheet()
@@ -1759,9 +1820,3 @@ ErrorHandler:
     Application.DisplayAlerts = True
     Application.StatusBar = "Error saving CSV: " & Err.Description
 End Sub
-
-
-
-
-
-

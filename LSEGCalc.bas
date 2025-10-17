@@ -47,9 +47,9 @@ Sub RefreshLSEGWithTimeout(ws As Worksheet, Optional timeoutSeconds As Long = 12
     Application.Calculation = originalCalcMode
     
     ' Force recalculation of the worksheet
-    Application.StatusBar = "Calculating " & ws.Name & "..."
-    DoEvents
-    ws.Calculate
+    'Application.StatusBar = "Calculating " & ws.Name & "..."
+    'DoEvents
+    'ws.Calculate
     
     Application.StatusBar = ws.Name & " refresh and calculation completed"
     Exit Sub
@@ -58,12 +58,14 @@ RefreshError:
     'Application.SendKeys "{ESC}"
     DoEvents
     
+    Application.StatusBar = "Error during refresh of " & ws.Name & ": " & Err.Description
+    
     ' Restore original calculation mode even on error
     Application.Calculation = originalCalcMode
     
     ' Still try to calculate the worksheet even if refresh had issues
     On Error Resume Next
-    ws.Calculate
+    'ws.Calculate
     On Error GoTo 0
     
     Application.StatusBar = ws.Name & " refresh interrupted (calculation attempted)"
