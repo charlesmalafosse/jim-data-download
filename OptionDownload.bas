@@ -539,18 +539,8 @@ Sub ProcessBatch_ProcessResults()
 '            Exit Do
 '        End If
     Loop
-    Application.StatusBar = "Batch #" & g_BatchCounter & ": Copying data to staging..."
-    For i = 0 To g_FormulaCount - 1
-        processRow = 2 + (i * ROW_SPACING)
 
-        If i Mod 5 = 0 Then
-            Application.StatusBar = "Batch #" & g_BatchCounter & ": Copying (" & (i + 1) & "/" & g_FormulaCount & ")..."
-        End If
-
-        CopyDataRowsToStaging wsCollection, processRow, ROW_SPACING
-    Next i
-
-    Application.StatusBar = "Batch #" & g_BatchCounter & ": Validating data..."
+    Application.StatusBar = "Batch #" & g_BatchCounter & ": Validating and copying data to staging..."
     ValidateAndUpdateRICListWithSpacing wsCollection, g_FormulaCount
 
     'Application.StatusBar = "Batch #" & g_BatchCounter & ": Final calculations..."
