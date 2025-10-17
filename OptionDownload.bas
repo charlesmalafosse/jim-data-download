@@ -6,7 +6,6 @@ Attribute VB_Name = "OptionDownload"
 Option Explicit
 
 ' Configuration Variables
-Public g_UnderlyingTicker As String
 Public g_NamePrefix As String
 Public g_RootRIC As String
 Public g_SpotPrice As Double
@@ -100,30 +99,31 @@ End Sub
 Sub RefreshFutureUnderlyings()
     Dim wsRIC As Worksheet
     Dim wsFuture As Worksheet
+    Dim wsConfig As Worksheet
     Dim uniqueUnderlyings As Collection
-    Dim existingUnderlyings As Collection
-    Dim missingUnderlyings As Collection
     Dim i As Long
+    Dim j As Long
     Dim lastRow As Long
     Dim underlyingValue As String
     Dim startCol As Long
     Dim startRow As Long
     Dim currentCol As Long
-    Dim foundUnderlying As String
     Dim underlying As Variant
     Dim formulaRow As Long
     Dim formulaCol As Long
     Dim headerRow As Long
     Dim headerCol As Long
-    Dim nextAvailableCol As Long
+    Dim underlyingsArray() As String
+    Dim arraySize As Long
+    Dim temp As String
+    Dim clearEndCol As Long
 
     On Error GoTo ErrorHandler
 
     Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
     Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
+    Set wsConfig = ThisWorkbook.Worksheets(SHEET_CONFIG)
     Set uniqueUnderlyings = New Collection
-    Set existingUnderlyings = New Collection
-    Set missingUnderlyings = New Collection
 
     ' Step 1: Extract unique underlyings from RIC_List column G
     Application.StatusBar = "Extracting unique underlyings from RIC_List..."
@@ -145,7 +145,69 @@ Sub RefreshFutureUnderlyings()
         Exit Sub
     End If
 
-    ' Step 2: Get starting position from RANGE_DOWNLOAD
+    ' Step 2: Convert collection to array and sort alphabetically
+    Application.StatusBar = "Sorting underlyings alphabetically..."
+    arraySize = uniqueUnderlyings.count
+    ReDim underlyingsArray(1 To arraySize)
+
+    i = 1
+    For Each underlying In uniqueUnderlyings
+        underlyingsArray(i) = CStr(underlying)
+        i = i + 1
+    Next underlying
+
+    ' Simple bubble sort
+    For i = 1 To arraySize - 1
+        For j = i + 1 To arraySize
+            If underlyingsArray(i) > underlyingsArray(j) Then
+                temp = underlyingsArray(i)
+                underlyingsArray(i) = underlyingsArray(j)
+                underlyingsArray(j) = temp
+            End If
+        Next j
+    Next i
+
+    ' Step 2b: Record RICs to RicBloomberg named range (on Config sheet)
+    Application.StatusBar = "Recording RICs to RicBloomberg range..."
+    Dim ricBloombergRange As Range
+    Dim ricDataStartRow As Long
+    Dim ricDataEndRow As Long
+    Dim ricRowNum As Long
+
+    On Error Resume Next
+    Set ricBloombergRange = wsConfig.Range("RicBloomberg")
+    On Error GoTo ErrorHandler
+
+    If Not ricBloombergRange Is Nothing Then
+        ' Calculate data rows (skip header row 1)
+        ricDataStartRow = ricBloombergRange.Row + 1  ' Skip header (N19 + 1 = N20)
+        ricDataEndRow = ricBloombergRange.Row + ricBloombergRange.Rows.count - 1  ' N31
+
+        ' Clear previous data in both columns (preserve header at row 1 of range)
+        wsConfig.Range(wsConfig.Cells(ricDataStartRow, ricBloombergRange.Column), _
+                      wsConfig.Cells(ricDataEndRow, ricBloombergRange.Column + 1)).ClearContents
+
+        ' Add sorted RICs to column 1 (column N)
+        ricRowNum = ricDataStartRow
+        For i = 1 To arraySize
+            If ricRowNum > ricDataEndRow Then
+                ' Exceeded available space - warn user
+                MsgBox "Warning: More RICs (" & arraySize & ") than available space in RicBloomberg range (" & _
+                       (ricDataEndRow - ricDataStartRow + 1) & " rows)." & vbNewLine & _
+                       "Only the first " & (ricDataEndRow - ricDataStartRow + 1) & " RICs were recorded.", _
+                       vbExclamation
+                Exit For
+            End If
+
+            wsConfig.Cells(ricRowNum, ricBloombergRange.Column).Value = underlyingsArray(i)
+            ricRowNum = ricRowNum + 1
+        Next i
+    Else
+        MsgBox "Named range 'RicBloomberg' not found in " & SHEET_CONFIG & vbNewLine & _
+               "Skipping RIC recording step.", vbExclamation
+    End If
+
+    ' Step 3: Get starting position from RANGE_DOWNLOAD
     On Error Resume Next
     startCol = wsFuture.Range(RANGE_DOWNLOAD).Column
     startRow = wsFuture.Range(RANGE_DOWNLOAD).Row
@@ -156,85 +218,53 @@ Sub RefreshFutureUnderlyings()
         Exit Sub
     End If
 
-    ' Step 3: Find existing underlyings and determine next available column
-    Application.StatusBar = "Checking existing underlyings in SHEET_FUTURE..."
+    ' Step 4: Clear existing underlying data
+    Application.StatusBar = "Clearing existing underlying data..."
+    ' Calculate end column (each underlying uses 3 columns, clear up to 100 columns as reasonable limit)
+    clearEndCol = startCol + 99
+
+    ' Clear the data area (from startRow to end of sheet, from startCol to clearEndCol)
+    wsFuture.Range(wsFuture.Cells(startRow, startCol), wsFuture.Cells(wsFuture.Rows.count, clearEndCol)).ClearContents
+
+    ' Step 5: Add all underlyings in alphabetical order
+    Application.StatusBar = "Adding " & arraySize & " underlyings in alphabetical order..."
+
     currentCol = startCol
-    nextAvailableCol = startCol
 
-    ' Scan for existing underlyings (every 3rd column)
-    While currentCol <= 100  ' Reasonable upper limit
-        foundUnderlying = Trim(CStr(wsFuture.Cells(startRow, currentCol).Value))
+    For i = 1 To arraySize
+        ' Calculate formula position
+        formulaRow = startRow + 2
+        formulaCol = currentCol - 1
+        headerRow = startRow + 1
+        headerCol = currentCol - 1
 
-        If foundUnderlying <> "" Then
-            existingUnderlyings.Add foundUnderlying, foundUnderlying
-            nextAvailableCol = currentCol + 3  ' Next available is 3 columns after last found
-        End If
+        ' Add header
+        wsFuture.Cells(headerRow, headerCol).Value = "Date"
+        wsFuture.Cells(headerRow, headerCol + 1).Value = "Last Price"
 
+        ' Add the RHistory formula
+        wsFuture.Cells(formulaRow, formulaCol).Formula = _
+            "=RHistory(""" & underlyingsArray(i) & """," & _
+            """.Timestamp;.Close""," & _
+            """NBROWS:5000 INTERVAL:1D"",,""Sort:ASC"")"
+
+        ' Add the underlying symbol in the RANGE_DOWNLOAD row/column
+        wsFuture.Cells(startRow, currentCol).Value = underlyingsArray(i)
+
+        ' Add metadata in the next column
+        wsFuture.Cells(startRow, currentCol + 1).Value = "Added: " & Format(Now, "yyyy-mm-dd hh:mm")
+
+        ' Move to next 3-column block
         currentCol = currentCol + 3
+    Next i
 
-        ' Break if we find 3 consecutive empty blocks
-        If wsFuture.Cells(startRow, currentCol).Value = "" And _
-           wsFuture.Cells(startRow, currentCol + 3).Value = "" And _
-           wsFuture.Cells(startRow, currentCol + 6).Value = "" Then
-        End If
-    Wend
+    ' Step 6: Refresh LSEG workspace
+    Application.StatusBar = "Refreshing LSEG data for " & arraySize & " underlyings..."
+    RefreshLSEGWithTimeout wsFuture, 120
 
-    ' Step 4: Identify missing underlyings
-    Dim found As Boolean
-    For Each underlying In uniqueUnderlyings
-        found = False
-
-        ' Check if this underlying already exists
-        On Error Resume Next
-        found = (existingUnderlyings(CStr(underlying)) <> "")
-        On Error GoTo ErrorHandler
-
-        If Not found Then
-            missingUnderlyings.Add underlying
-        End If
-    Next underlying
-
-    ' Step 5: Add RHistory formulas for missing underlyings
-    If missingUnderlyings.count > 0 Then
-        Application.StatusBar = "Adding RHistory formulas for " & missingUnderlyings.count & " missing underlyings..."
-
-        currentCol = nextAvailableCol
-
-        For Each underlying In missingUnderlyings
-            ' Calculate formula position (row-1, col-1 relative to RANGE_DOWNLOAD position)
-            formulaRow = startRow + 2
-            formulaCol = currentCol - 1
-            headerRow = startRow + 1
-            headerCol = currentCol - 1
-            
-            ' Add header
-            wsFuture.Cells(headerRow, headerCol).Value = "Date"
-            wsFuture.Cells(headerRow, headerCol + 1).Value = "Last Price"
-
-            ' Add the RHistory formula
-            wsFuture.Cells(formulaRow, formulaCol).Formula = _
-                "=RHistory(""" & underlying & """," & _
-                """.Timestamp;.Close""," & _
-                """NBROWS:5000 INTERVAL:1D"",,""Sort:ASC"")"
-
-            ' Add the underlying symbol in the RANGE_DOWNLOAD row/column
-            wsFuture.Cells(startRow, currentCol).Value = underlying
-
-            ' Add metadata in the next column
-            wsFuture.Cells(startRow, currentCol + 1).Value = "Added: " & Format(Now, "yyyy-mm-dd hh:mm")
-
-            ' Move to next 3-column block
-            currentCol = currentCol + 3
-        Next underlying
-
-        ' Step 6: Refresh LSEG workspace
-        RefreshLSEGWithTimeout wsFuture, 120
-
-        MsgBox "Added " & missingUnderlyings.count & " underlyings to SHEET_FUTURE." & vbNewLine & _
-               "Data refresh complete. Please verify the downloaded data.", vbInformation
-    Else
-        MsgBox "All required underlyings are already present in SHEET_FUTURE.", vbInformation
-    End If
+    MsgBox "Added " & arraySize & " underlyings to SHEET_FUTURE in alphabetical order." & vbNewLine & _
+           "Data refresh complete. Please verify the downloaded data." & vbNewLine & _
+           "IMPORTANT: Add Bloomberg equivalent for underlying RICs in RicBloomberg range.", vbInformation
 
     Application.StatusBar = False
     Exit Sub
@@ -302,7 +332,7 @@ Sub MainDownloadProcess()
     totalRICs = CountUnprocessedRICs()
 
     ' Show summary
-    response = MsgBox("Starting download for: " & g_UnderlyingTicker & vbNewLine & _
+    response = MsgBox("Starting download for: " & g_RootRIC & vbNewLine & _
                      "Date Range: " & g_DateStart & " to " & g_DateEnd & vbNewLine & _
                      "RICs to process: " & totalRICs & vbNewLine & _
                      vbNewLine & "Continue?", vbYesNo + vbQuestion)
@@ -723,7 +753,7 @@ Sub SetupRHistoryAndMetadata(ws As Worksheet, startRow As Long, maxRows As Long,
     ' Setup basic metadata and VLOOKUP formulas (NO Greek formulas yet)
     For i = startRow To endRow
         ' Store metadata
-        ws.Cells(i, 3).Value = underlyingTicker & " " & optType & " " & strike
+        ws.Cells(i, 3).Value = GetBloombergTicker(underlyingTicker) & " " & Left(optType, 1) & " " & strike
         ws.Cells(i, 4).Value = maturity
 
         ' Column E: Interest_rate - VLOOKUP from RFR range with dynamic last row
@@ -750,8 +780,8 @@ Sub SetupRHistoryAndMetadata(ws As Worksheet, startRow As Long, maxRows As Long,
         ws.Cells(i, 15).Value = ricRowRef
         ws.Cells(i, 16).Value = optionRic
         ws.Cells(i, 17).Value = g_LotSize
-        ws.Cells(i, 18).Value = g_NamePrefix & " " & optType & " " & strike & " " & Format(maturity, "mmm-yyyy")
-        ws.Cells(i, 19).Value = underlyingTicker
+        ws.Cells(i, 18).Value = g_NamePrefix & " " & Left(optType, 1) & " " & strike & " " & Format(maturity, "mmm-yyyy")
+        ws.Cells(i, 19).Value = GetBloombergTicker(underlyingTicker)
         ws.Cells(i, 20).Value = g_Currency
         ws.Cells(i, 21).Value = 0
     Next i
@@ -1373,7 +1403,7 @@ Sub GenerateQualityReport()
     ' Generate report
     ws.Range("A1").Value = "Option Data Quality Report"
     ws.Range("A2").Value = "Generated: " & Now
-    ws.Range("A3").Value = "Underlying: " & g_UnderlyingTicker
+    ws.Range("A3").Value = "Root RIC: " & g_RootRIC
     
     summaryRow = 5
     ws.Cells(summaryRow, 1).Value = "Summary Statistics"
@@ -1407,7 +1437,6 @@ Function LoadConfiguration() As Boolean
     
     Set ws = ThisWorkbook.Worksheets(SHEET_CONFIG)
     
-    g_UnderlyingTicker = ws.Range("underlyingTicker").Value
     g_RootRIC = ws.Range("rootRIC").Value
     g_StrikeStep = ws.Range("steps").Value
     g_LotSize = ws.Range("lotSize").Value
@@ -1494,6 +1523,53 @@ Function GetSpotPrice(underlyingTicker As String) As Double
     GetSpotPrice = g_SpotPrice
 
     On Error GoTo 0
+End Function
+
+Function GetBloombergTicker(underlyingRIC As String) As String
+    ' Lookup Bloomberg ticker from RicBloomberg table on Config sheet
+    ' Column 1 (N): LSEG underlying RIC (e.g., "ESZ4")
+    ' Column 2 (O): Bloomberg ticker (e.g., "ES1 Index")
+    Dim wsConfig As Worksheet
+    Dim ricBloombergRange As Range
+    Dim searchRow As Long
+    Dim firstDataRow As Long
+    Dim lastDataRow As Long
+    Dim foundRIC As String
+
+    On Error Resume Next
+    Set wsConfig = ThisWorkbook.Worksheets(SHEET_CONFIG)
+    Set ricBloombergRange = wsConfig.Range("RicBloomberg")
+    On Error GoTo 0
+
+    ' If range not found, return input as fallback
+    If ricBloombergRange Is Nothing Then
+        GetBloombergTicker = underlyingRIC
+        Exit Function
+    End If
+
+    ' Calculate data rows (skip header row 1)
+    firstDataRow = ricBloombergRange.Row + 1
+    lastDataRow = ricBloombergRange.Row + ricBloombergRange.Rows.Count - 1
+
+    ' Search for matching RIC in column 1 of range
+    For searchRow = firstDataRow To lastDataRow
+        foundRIC = Trim(CStr(wsConfig.Cells(searchRow, ricBloombergRange.Column).Value))
+
+        If foundRIC = underlyingRIC Then
+            ' Found match - return Bloomberg ticker from column 2
+            GetBloombergTicker = Trim(CStr(wsConfig.Cells(searchRow, ricBloombergRange.Column + 1).Value))
+
+            ' If Bloomberg ticker is empty, return input as fallback
+            If GetBloombergTicker = "" Then
+                GetBloombergTicker = underlyingRIC
+            End If
+
+            Exit Function
+        End If
+    Next searchRow
+
+    ' Not found in table - return input RIC as fallback
+    GetBloombergTicker = underlyingRIC
 End Function
 
 Function GetRiskFreeRate() As Double
@@ -1759,7 +1835,7 @@ Sub ExportToCSV()
 
     Set stagingWs = ThisWorkbook.Worksheets(SHEET_STAGING)
 
-    fileName = g_UnderlyingTicker & "_" & Format(Date, "yyyymm") & ".csv"
+    fileName = g_RootRIC & "_" & Format(Date, "yyyymm") & ".csv"
     csvPath = ThisWorkbook.Path & "\" & fileName
 
     stagingWs.Copy
@@ -1787,9 +1863,9 @@ Sub SaveStagingToCSV(Optional batchNumber As Long = 0)
 
     ' Build filename with batch number if provided
     If batchNumber > 0 Then
-        fileName = g_UnderlyingTicker & "_" & Format(Date, "yyyymmdd_HHmmss") & "_batch" & batchNumber & ".csv"
+        fileName = g_RootRIC & "_" & Format(Date, "yyyymmdd_HHmmss") & "_batch" & batchNumber & ".csv"
     Else
-        fileName = g_UnderlyingTicker & "_" & Format(Date, "yyyymmdd_HHmmss") & ".csv"
+        fileName = g_RootRIC & "_" & Format(Date, "yyyymmdd_HHmmss") & ".csv"
     End If
 
     csvPath = ThisWorkbook.Path & "\" & fileName
@@ -1810,3 +1886,5 @@ ErrorHandler:
     Application.DisplayAlerts = True
     Application.StatusBar = "Error saving CSV: " & Err.Description
 End Sub
+
+
