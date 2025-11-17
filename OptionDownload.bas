@@ -223,8 +223,12 @@ Sub RefreshFutureUnderlyings()
     ' Calculate end column (each underlying uses 3 columns, clear up to 100 columns as reasonable limit)
     clearEndCol = startCol + 99
 
-    ' Clear the data area (from startRow to end of sheet, from startCol to clearEndCol)
-    wsFuture.Range(wsFuture.Cells(startRow, startCol), wsFuture.Cells(wsFuture.Rows.count, clearEndCol)).ClearContents
+    ' Clear the data area - clear up to 10000 rows from startRow (not entire sheet)
+    ' This prevents accidentally clearing formulas/data far below the expected range
+    Dim clearEndRow As Long
+    clearEndRow = startRow + 10000
+
+    wsFuture.Range(wsFuture.Cells(startRow, startCol), wsFuture.Cells(clearEndRow, clearEndCol)).ClearContents
 
     ' Step 5: Add all underlyings in alphabetical order
     Application.StatusBar = "Adding " & arraySize & " underlyings in alphabetical order..."
@@ -499,6 +503,8 @@ End Sub
 ' ============================================
 Sub ProcessBatch_CheckRefresh()
     Dim wsCollection As Worksheet
+    Dim readyCount As Long
+    Dim totalChecks As Long
 
     ' Check stop flag
     If g_StopRequested Then
@@ -508,7 +514,7 @@ Sub ProcessBatch_CheckRefresh()
 
     ' Check timeout
     g_RefreshCheckCount = g_RefreshCheckCount + 1
-    If g_RefreshCheckCount > 60 Then  ' 60 checks ? 3 sec = 3 min timeout
+    If g_RefreshCheckCount > 60 Then  ' 60 checks × 3 sec = 3 min timeout
         MsgBox "LSEG refresh timeout for batch #" & g_BatchCounter & " - proceeding anyway", vbExclamation
         ProcessBatch_ProcessResults
         Exit Sub
@@ -516,14 +522,15 @@ Sub ProcessBatch_CheckRefresh()
 
     Set wsCollection = ThisWorkbook.Worksheets(SHEET_COLLECTION)
 
-    Application.StatusBar = "Batch #" & g_BatchCounter & ": Checking refresh status (attempt " & g_RefreshCheckCount & ")..."
-
-    ' Check if data ready
-    If IsDataReady(wsCollection) Then
+    ' Check if data ready (with progress tracking)
+    If IsDataReady(wsCollection, readyCount, totalChecks) Then
         ' Data ready, proceed
+        Application.StatusBar = "Batch #" & g_BatchCounter & ": All data ready (" & readyCount & "/" & totalChecks & " cells) - processing..."
         ProcessBatch_ProcessResults
     Else
-        ' Still waiting, reschedule
+        ' Still waiting, reschedule - show progress in status bar
+        Application.StatusBar = "Batch #" & g_BatchCounter & ": Waiting for LSEG data... " & _
+                               readyCount & " of " & totalChecks & " cells ready (check #" & g_RefreshCheckCount & ")"
         g_NextScheduledProc = "ProcessBatch_CheckRefresh"
         Application.OnTime Now + TimeValue("00:00:03"), g_NextScheduledProc
     End If
@@ -644,32 +651,59 @@ End Sub
 ' Helper Functions for OnTime Chain
 ' ============================================
 
-' Check if LSEG data has loaded
-Function IsDataReady(ws As Worksheet) As Boolean
+' Check if LSEG data has loaded (with optional progress tracking)
+Function IsDataReady(ws As Worksheet, Optional ByRef outReadyCount As Long, Optional ByRef outTotalChecks As Long) As Boolean
     Dim checkRow As Long
     Dim readyCount As Long
     Dim totalChecks As Long
     Dim cellValue As Variant
     Dim cellText As String
+    Dim i As Long
+    Dim samplePositions() As Long
+    Dim maxSamples As Long
     Const ROW_SPACING As Long = 300
 
     totalChecks = 0
     readyCount = 0
+    maxSamples = Application.Min(10, g_FormulaCount)  ' Increased from 5 to 10 samples
 
-    ' Check first few formulas (max 5 samples)
-    For checkRow = 2 To 2 + (g_FormulaCount * ROW_SPACING) Step ROW_SPACING
-        totalChecks = totalChecks + 1
+    ' Build array of positions to check (first, last, and evenly distributed middle positions)
+    ReDim samplePositions(1 To maxSamples)
 
-        cellValue = ws.Cells(checkRow, 2).Value
-        cellText = CStr(ws.Cells(checkRow, 2).Text)
+    If g_FormulaCount > 0 Then
+        For i = 1 To maxSamples
+            If i = 1 Then
+                ' First formula
+                samplePositions(i) = 2
+            ElseIf i = maxSamples And g_FormulaCount > 1 Then
+                ' Last formula
+                samplePositions(i) = 2 + ((g_FormulaCount - 1) * ROW_SPACING)
+            Else
+                ' Evenly distributed middle positions
+                samplePositions(i) = 2 + (((i - 1) * g_FormulaCount \ maxSamples) * ROW_SPACING)
+            End If
+        Next i
 
-        ' Check if cell is ready (no longer shows "Retrieving..." and has valid data or empty)
-        If InStr(1, cellText, "Retrieving...", vbTextCompare) = 0 Then
-            readyCount = readyCount + 1
-        End If
+        ' Check sampled positions
+        For i = 1 To maxSamples
+            checkRow = samplePositions(i)
+            totalChecks = totalChecks + 1
 
-        If totalChecks >= 5 Then Exit For
-    Next
+            cellValue = ws.Cells(checkRow, 2).Value
+            cellText = CStr(ws.Cells(checkRow, 2).Text)
+
+            ' Check if cell is ready (no longer shows LSEG status messages)
+            If InStr(1, cellText, "Retrieving", vbTextCompare) = 0 And _
+               InStr(1, cellText, "Requesting", vbTextCompare) = 0 And _
+               InStr(1, cellText, "Loading", vbTextCompare) = 0 Then
+                readyCount = readyCount + 1
+            End If
+        Next i
+    End If
+
+    ' Return progress info via optional ByRef parameters
+    outReadyCount = readyCount
+    outTotalChecks = totalChecks
 
     ' Consider ready if ALL checked cells are no longer refreshing
     IsDataReady = (totalChecks > 0 And readyCount = totalChecks)
@@ -765,11 +799,11 @@ Sub SetupRHistoryAndMetadata(ws As Worksheet, startRow As Long, maxRows As Long,
             ws.Cells(i, 5).Value = "not found"
         End If
 
-        ' Column F: Spot - VLOOKUP from underlying data
+        ' Column F: Spot - VLOOKUP from underlying data (matches 10000-row clearing limit)
         If underlyingCol > 0 Then
             ws.Cells(i, 6).Formula = "=IFERROR(VLOOKUP(A" & i & ",'" & SHEET_FUTURE & "'!" & _
                 wsFuture.Cells(startRowFuture + 2, underlyingCol - 1).Address(False, False) & ":" & _
-                wsFuture.Cells(startRowFuture + 5000, underlyingCol).Address(False, False) & ",2,TRUE),"""")"
+                wsFuture.Cells(startRowFuture + 10000, underlyingCol).Address(False, False) & ",2,TRUE),"""")"
         Else
             ws.Cells(i, 6).Value = GetSpotPrice(underlyingTicker)
         End If
@@ -1549,7 +1583,7 @@ Function GetBloombergTicker(underlyingRIC As String) As String
 
     ' Calculate data rows (skip header row 1)
     firstDataRow = ricBloombergRange.Row + 1
-    lastDataRow = ricBloombergRange.Row + ricBloombergRange.Rows.Count - 1
+    lastDataRow = ricBloombergRange.Row + ricBloombergRange.Rows.count - 1
 
     ' Search for matching RIC in column 1 of range
     For searchRow = firstDataRow To lastDataRow
@@ -1635,11 +1669,11 @@ Sub ClearCollectionSheet()
 
     ws.Range("A1:AB1").Font.Bold = True
 
-    ' Format column A (Spot_Date) as Short Date (day/month/year) to ensure proper date formatting from LSEG formulas
-    ws.Columns("A:A").NumberFormat = "d/m/yyyy"
+    ' Format column A (Spot_Date) as YYYY-MM-DD hh:mm:ss for CSV export
+    ws.Columns("A:A").NumberFormat = "yyyy-mm-dd hh:mm:ss"
 
-    ' Format column D (Maturity) as Short Date
-    ws.Columns("D:D").NumberFormat = "d/m/yyyy"
+    ' Format column D (Maturity) as YYYY-MM-DD hh:mm:ss for CSV export
+    ws.Columns("D:D").NumberFormat = "yyyy-mm-dd hh:mm:ss"
 End Sub
 
 Sub ClearStagingSheet()
@@ -1691,9 +1725,9 @@ Sub SetupStagingSheet()
 
     ws.Range("A1:Z1").Font.Bold = True
 
-    ' Format date columns to d/m/yyyy
-    ws.Columns("A:A").NumberFormat = "d/m/yyyy"  ' Spot_Date
-    ws.Columns("D:D").NumberFormat = "d/m/yyyy"  ' Maturity
+    ' Format date columns to YYYY-MM-DD hh:mm:ss for CSV export
+    ws.Columns("A:A").NumberFormat = "yyyy-mm-dd hh:mm:ss"  ' Spot_Date
+    ws.Columns("D:D").NumberFormat = "yyyy-mm-dd hh:mm:ss"  ' Maturity
 
     ' Format numeric columns with sufficient decimal places for full precision
     ws.Columns("B:B").NumberFormat = "General"   ' Premium
@@ -1886,5 +1920,4 @@ ErrorHandler:
     Application.DisplayAlerts = True
     Application.StatusBar = "Error saving CSV: " & Err.Description
 End Sub
-
 
