@@ -56,6 +56,9 @@ Public Const RANGE_UNDERLYING_START_DATE As String = "UnderlyingStartDate"
 Public Const RANGE_UNDERLYING_END_DATE As String = "UnderlyingEndDate"
 Public Const RANGE_RFR As String = "RFR"
 
+' Data Limits
+Public Const MAX_UNDERLYING_ROWS As Long = 10000  ' Maximum rows for underlying price data and VLOOKUP ranges
+
 ' Types
 Type BatchInfo
     maturityDate As Date
@@ -223,10 +226,10 @@ Sub RefreshFutureUnderlyings()
     ' Calculate end column (each underlying uses 3 columns, clear up to 100 columns as reasonable limit)
     clearEndCol = startCol + 99
 
-    ' Clear the data area - clear up to 10000 rows from startRow (not entire sheet)
+    ' Clear the data area - clear up to MAX_UNDERLYING_ROWS from startRow (not entire sheet)
     ' This prevents accidentally clearing formulas/data far below the expected range
     Dim clearEndRow As Long
-    clearEndRow = startRow + 10000
+    clearEndRow = startRow + MAX_UNDERLYING_ROWS
 
     wsFuture.Range(wsFuture.Cells(startRow, startCol), wsFuture.Cells(clearEndRow, clearEndCol)).ClearContents
 
@@ -726,11 +729,77 @@ Sub ProcessBatch_Abort()
            "Progress saved in RIC_List sheet.", vbInformation
 End Sub
 
-' Helper function to build VLOOKUP formula for underlying spot price
+' ============================================
+' Helper Functions for Formula Building
+' ============================================
+
+' Find the column number for a specific underlying in the Future sheet
+Function FindUnderlyingColumn(underlyingTicker As String) As Long
+    Dim wsFuture As Worksheet
+    Dim startCol As Long
+    Dim startRow As Long
+    Dim currentCol As Long
+    Dim foundUnderlying As String
+
+    Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
+
+    ' Get starting position from RANGE_DOWNLOAD
+    On Error Resume Next
+    startCol = wsFuture.Range(RANGE_DOWNLOAD).Column
+    startRow = wsFuture.Range(RANGE_DOWNLOAD).Row
+    On Error GoTo 0
+
+    FindUnderlyingColumn = 0  ' Default: not found
+
+    If startCol > 0 And startRow > 0 Then
+        ' Scan columns in steps of 3 (each underlying uses 3 columns)
+        currentCol = startCol
+        Do While currentCol <= 100  ' Reasonable upper limit
+            foundUnderlying = Trim(CStr(wsFuture.Cells(startRow, currentCol).Value))
+
+            If foundUnderlying = underlyingTicker Then
+                FindUnderlyingColumn = currentCol
+                Exit Function
+            End If
+
+            currentCol = currentCol + 3  ' Jump to next underlying block
+
+            ' Exit if we find empty blocks (no more underlyings)
+            If wsFuture.Cells(startRow, currentCol).Value = "" And _
+               wsFuture.Cells(startRow, currentCol + 3).Value = "" Then
+                Exit Do
+            End If
+        Loop
+    End If
+End Function
+
+' Build VLOOKUP formula for underlying spot price
 Function BuildSpotVLOOKUPFormula(rowNum As Long, underlyingTicker As String) As String
-    ' Build VLOOKUP formula to get spot price from SHEET_FUTURE based on date in column A
-    ' Returns formula that looks up the underlying's price column
-    BuildSpotVLOOKUPFormula = "=IFERROR(INDEX('" & SHEET_FUTURE & "'!GetUnderlyingPriceColumn(""" & underlyingTicker & """),MATCH(A" & rowNum & ",'" & SHEET_FUTURE & "'!GetUnderlyingDateColumn(""" & underlyingTicker & """),1)),"""")"
+    Dim wsFuture As Worksheet
+    Dim startRow As Long
+    Dim underlyingCol As Long
+
+    Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
+
+    ' Get starting row from RANGE_DOWNLOAD
+    On Error Resume Next
+    startRow = wsFuture.Range(RANGE_DOWNLOAD).Row
+    On Error GoTo 0
+
+    ' Find the column for this underlying
+    underlyingCol = FindUnderlyingColumn(underlyingTicker)
+
+    If underlyingCol > 0 And startRow > 0 Then
+        ' Build VLOOKUP formula: lookup date in column A, return price from underlying's column
+        ' Range: Date column (underlyingCol - 1) and Price column (underlyingCol)
+        BuildSpotVLOOKUPFormula = "=IFERROR(VLOOKUP(A" & rowNum & ",'" & SHEET_FUTURE & "'!" & _
+            wsFuture.Cells(startRow + 2, underlyingCol - 1).Address(False, False) & ":" & _
+            wsFuture.Cells(startRow + MAX_UNDERLYING_ROWS, underlyingCol).Address(False, False) & _
+            ",2,TRUE),"""")"
+    Else
+        ' If column not found, return empty formula
+        BuildSpotVLOOKUPFormula = ""
+    End If
 End Function
 
 ' New optimized approach: Setup minimal metadata before LSEG refresh
@@ -740,36 +809,16 @@ Sub SetupRHistoryAndMetadata(ws As Worksheet, startRow As Long, maxRows As Long,
     Dim endRow As Long
     Dim wsFuture As Worksheet
     Dim underlyingCol As Long
-    Dim startCol As Long
-    Dim startRowFuture As Long
-    Dim currentCol As Long
-    Dim foundUnderlying As String
     Dim rfrRange As Range
     Dim rfrRow As Long
     Dim rfrCol As Long
     Dim rfrLastRow As Long
+    Dim spotFormula As String
 
-    ' Find the underlying column in SHEET_FUTURE
     Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
-    On Error Resume Next
-    startCol = wsFuture.Range(RANGE_DOWNLOAD).Column
-    startRowFuture = wsFuture.Range(RANGE_DOWNLOAD).Row
-    On Error GoTo 0
 
-    underlyingCol = 0
-    If startCol > 0 Then
-        currentCol = startCol
-        While currentCol <= 100
-            foundUnderlying = Trim(CStr(wsFuture.Cells(startRowFuture, currentCol).Value))
-            If foundUnderlying = underlyingTicker Then
-                underlyingCol = currentCol
-            End If
-            currentCol = currentCol + 3
-            If wsFuture.Cells(startRowFuture, currentCol).Value = "" And _
-               wsFuture.Cells(startRowFuture, currentCol + 3).Value = "" Then
-            End If
-        Wend
-    End If
+    ' Find the underlying column using helper function
+    underlyingCol = FindUnderlyingColumn(underlyingTicker)
 
     ' Get RFR range position and find last row with data
     On Error Resume Next
@@ -799,12 +848,12 @@ Sub SetupRHistoryAndMetadata(ws As Worksheet, startRow As Long, maxRows As Long,
             ws.Cells(i, 5).Value = "not found"
         End If
 
-        ' Column F: Spot - VLOOKUP from underlying data (matches 10000-row clearing limit)
-        If underlyingCol > 0 Then
-            ws.Cells(i, 6).Formula = "=IFERROR(VLOOKUP(A" & i & ",'" & SHEET_FUTURE & "'!" & _
-                wsFuture.Cells(startRowFuture + 2, underlyingCol - 1).Address(False, False) & ":" & _
-                wsFuture.Cells(startRowFuture + 10000, underlyingCol).Address(False, False) & ",2,TRUE),"""")"
+        ' Column F: Spot - VLOOKUP from underlying data using helper function
+        spotFormula = BuildSpotVLOOKUPFormula(i, underlyingTicker)
+        If spotFormula <> "" Then
+            ws.Cells(i, 6).Formula = spotFormula
         Else
+            ' Fallback if underlying column not found
             ws.Cells(i, 6).Value = GetSpotPrice(underlyingTicker)
         End If
 
