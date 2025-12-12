@@ -42,6 +42,12 @@ Public g_StopRequested As Boolean
 Public g_NextScheduledProc As String
 Public g_RefreshCheckCount As Long
 
+' OnTime Chain State for RefreshFutureUnderlyings
+Public g_FutureSheet As Worksheet
+Public g_FutureUnderlyingCount As Long
+Public g_FutureRefreshCheckCount As Long
+Public g_FutureStopRequested As Boolean
+
 ' Sheet Names
 Public Const SHEET_CONFIG As String = "Config"
 Public Const SHEET_RIC_LIST As String = "RIC_List"  ' Now used for progress tracking
@@ -100,6 +106,8 @@ Sub RefreshFutureSheet()
 End Sub
 
 Sub RefreshFutureUnderlyings()
+    ' Downloads underlying futures data from LSEG
+    ' Uses OnTime chain pattern for async LSEG refresh (non-blocking)
     Dim wsRIC As Worksheet
     Dim wsFuture As Worksheet
     Dim wsConfig As Worksheet
@@ -123,10 +131,17 @@ Sub RefreshFutureUnderlyings()
 
     On Error GoTo ErrorHandler
 
+    ' Initialize state
+    g_FutureStopRequested = False
+    g_FutureRefreshCheckCount = 0
+
     Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
     Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
     Set wsConfig = ThisWorkbook.Worksheets(SHEET_CONFIG)
     Set uniqueUnderlyings = New Collection
+
+    ' Store sheet reference for OnTime callbacks
+    Set g_FutureSheet = wsFuture
 
     ' Step 1: Extract unique underlyings from RIC_List column G
     Application.StatusBar = "Extracting unique underlyings from RIC_List..."
@@ -265,20 +280,88 @@ Sub RefreshFutureUnderlyings()
         currentCol = currentCol + 3
     Next i
 
-    ' Step 6: Refresh LSEG workspace
+    ' Store count for completion message
+    g_FutureUnderlyingCount = arraySize
+
+    ' Step 6: Refresh LSEG workspace (non-blocking)
     Application.StatusBar = "Refreshing LSEG data for " & arraySize & " underlyings..."
-    RefreshLSEGWithTimeout wsFuture, 120
 
-    MsgBox "Added " & arraySize & " underlyings to SHEET_FUTURE in alphabetical order." & vbNewLine & _
-           "Data refresh complete. Please verify the downloaded data." & vbNewLine & _
-           "IMPORTANT: Add Bloomberg equivalent for underlying RICs in RicBloomberg range.", vbInformation
+    ' Trigger LSEG refresh (non-blocking call)
+    Application.Run "WorkspaceRefreshWorksheet", True, 120000, wsFuture.Name
 
-    Application.StatusBar = False
+    ' Schedule check via OnTime (non-blocking - allows LSEG to populate data)
+    Application.OnTime Now + TimeValue("00:00:05"), "RefreshFutureUnderlyings_CheckReady"
+
+    ' VBA execution ends here - OnTime chain runs asynchronously
     Exit Sub
 
 ErrorHandler:
     Application.StatusBar = False
     MsgBox "Error in RefreshFutureUnderlyings: " & Err.Description, vbExclamation
+End Sub
+
+' ============================================
+' Check if Future Underlyings data is ready
+' ============================================
+Sub RefreshFutureUnderlyings_CheckReady()
+    Dim readyCount As Long
+    Dim totalCount As Long
+
+    ' Force recalculation before checking
+    g_FutureSheet.Calculate
+
+    ' Check stop flag
+    If g_FutureStopRequested Then
+        RefreshFutureUnderlyings_Abort
+        Exit Sub
+    End If
+
+    ' Check timeout (60 checks x 3 sec = ~3 min)
+    g_FutureRefreshCheckCount = g_FutureRefreshCheckCount + 1
+    If g_FutureRefreshCheckCount > 60 Then
+        Application.StatusBar = "Underlyings download timeout - completing anyway..."
+        RefreshFutureUnderlyings_Complete
+        Exit Sub
+    End If
+
+    ' Check if data is ready using IsLSEGDataReady
+    If IsLSEGDataReady(g_FutureSheet, readyCount, totalCount, 10) Then
+        Application.StatusBar = "Underlying data ready (" & readyCount & "/" & totalCount & ") - completing..."
+        RefreshFutureUnderlyings_Complete
+    Else
+        Application.StatusBar = "Downloading underlyings... " & readyCount & " of " & totalCount & " ready (check #" & g_FutureRefreshCheckCount & ")"
+        ' Reschedule check
+        Application.OnTime Now + TimeValue("00:00:03"), "RefreshFutureUnderlyings_CheckReady"
+    End If
+End Sub
+
+' ============================================
+' Complete Future Underlyings refresh
+' ============================================
+Sub RefreshFutureUnderlyings_Complete()
+    Application.StatusBar = False
+
+    MsgBox "Added " & g_FutureUnderlyingCount & " underlyings to " & SHEET_FUTURE & " in alphabetical order." & vbNewLine & _
+           "Data refresh complete. Please verify the downloaded data." & vbNewLine & _
+           "IMPORTANT: Add Bloomberg equivalent for underlying RICs in RicBloomberg range.", vbInformation
+End Sub
+
+' ============================================
+' Stop handler for RefreshFutureUnderlyings
+' ============================================
+Sub StopRefreshFutureUnderlyings()
+    g_FutureStopRequested = True
+    Application.StatusBar = "Stop requested - will halt after current operation..."
+    MsgBox "Download will stop after current check completes.", vbInformation
+End Sub
+
+' ============================================
+' Abort handler for RefreshFutureUnderlyings
+' ============================================
+Sub RefreshFutureUnderlyings_Abort()
+    g_FutureStopRequested = False
+    Application.StatusBar = False
+    MsgBox "Underlyings download stopped.", vbInformation
 End Sub
 
 
@@ -509,6 +592,11 @@ Sub ProcessBatch_CheckRefresh()
     Dim readyCount As Long
     Dim totalChecks As Long
 
+    Set wsCollection = ThisWorkbook.Worksheets(SHEET_COLLECTION)
+
+    ' Force recalculation before checking
+    wsCollection.Calculate
+
     ' Check stop flag
     If g_StopRequested Then
         ProcessBatch_Abort
@@ -517,13 +605,11 @@ Sub ProcessBatch_CheckRefresh()
 
     ' Check timeout
     g_RefreshCheckCount = g_RefreshCheckCount + 1
-    If g_RefreshCheckCount > 60 Then  ' 60 checks × 3 sec = 3 min timeout
+    If g_RefreshCheckCount > 60 Then  ' 60 checks � 3 sec = 3 min timeout
         MsgBox "LSEG refresh timeout for batch #" & g_BatchCounter & " - proceeding anyway", vbExclamation
         ProcessBatch_ProcessResults
         Exit Sub
     End If
-
-    Set wsCollection = ThisWorkbook.Worksheets(SHEET_COLLECTION)
 
     ' Check if data ready (with progress tracking)
     If IsDataReady(wsCollection, readyCount, totalChecks) Then
@@ -1969,4 +2055,6 @@ ErrorHandler:
     Application.DisplayAlerts = True
     Application.StatusBar = "Error saving CSV: " & Err.Description
 End Sub
+
+
 

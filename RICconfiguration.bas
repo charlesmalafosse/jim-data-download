@@ -1,4 +1,3 @@
-Attribute VB_Name = "RICconfiguration"
 ' ============================================
 ' RIC GENERATOR MODULE
 ' Generates complete list of option RICs based on
@@ -14,6 +13,23 @@ Public Const SHEET_CONFIG As String = "Config"
 Public Const SHEET_RIC_LIST As String = "RIC_List"
 Public Const MONTH_CALL = "monthCall"
 Public Const MONTH_PUT = "monthPut"
+
+' OnTime Chain State for DownloadFromChain
+Public g_ChainState As Long
+Public g_ChainSheet As Worksheet
+Public g_ChainRootRIC As String
+Public g_ChainIndex As Long
+Public g_ChainTotalChains As Long
+Public g_ChainStepSize As Long
+Public g_ChainRefreshCheckCount As Long
+Public g_ChainStopRequested As Boolean
+Public g_RICListSheet As Worksheet
+
+Public Const CHAIN_STATE_IDLE As Long = 0
+Public Const CHAIN_STATE_DOWNLOADING_CHAINS As Long = 1
+Public Const CHAIN_STATE_PROCESSING_CHAINS As Long = 2
+Public Const CHAIN_STATE_DOWNLOADING_OPTIONS As Long = 3
+Public Const CHAIN_STATE_PROCESSING_OPTIONS As Long = 4
 
 ' ============================================
 ' MAIN RIC GENERATION FUNCTION
@@ -430,74 +446,287 @@ End Sub
 
 Sub DownloadFromChain()
     ' Downloads option chain from LSEG and populates RIC_List sheet
+    ' Uses OnTime chain pattern for async LSEG refresh (non-blocking)
     Dim ws As Worksheet
-    Dim chainSheet As Worksheet
-    Dim ricListSheet As Worksheet
-    Dim rootRIC As String
     Dim chainRIC As String
-    Dim lastRow As Long
-    Dim i As Long
 
     On Error GoTo ErrorHandler
 
+    ' Initialize state
+    g_ChainState = CHAIN_STATE_IDLE
+    g_ChainStopRequested = False
+    g_ChainRefreshCheckCount = 0
+    g_ChainIndex = 0
+    g_ChainStepSize = 7
+
     ' Get root RIC from config
     Set ws = ThisWorkbook.Sheets(SHEET_CONFIG)
-    rootRIC = Trim(ws.Range("rootRIC").Value)
+    g_ChainRootRIC = Trim(ws.Range("rootRIC").Value)
 
-    If rootRIC = "" Then
+    If g_ChainRootRIC = "" Then
         MsgBox "Please specify root RIC in Config sheet!", vbExclamation
         Exit Sub
     End If
 
     ' Create chain RIC for option chain download
-    chainRIC = "0#" & rootRIC & "+"
+    chainRIC = "0#" & g_ChainRootRIC & "+"
 
     ' Create or clear chain download sheet
-    Set chainSheet = CreateChainDownloadSheet()
+    Set g_ChainSheet = CreateChainDownloadSheet()
 
     ' Setup chain download formula
-    chainSheet.Range("A1").Value = "Chain RIC"
-    chainSheet.Range("B1").Value = "Chain Data"
-    chainSheet.Range("C1").Value = "Status"
-    chainSheet.Range("A1:E1").Font.Bold = True
+    g_ChainSheet.Range("A1").Value = "Chain RIC"
+    g_ChainSheet.Range("B1").Value = "Chain Data"
+    g_ChainSheet.Range("C1").Value = "Status"
+    g_ChainSheet.Range("A1:E1").Font.Bold = True
 
     ' Add chain download formula
-    chainSheet.Range("A2").Value = chainRIC
-    chainSheet.Range("B2").Formula = "=@TR(""" & chainRIC & """,""CF_NAME"",""CH=Fd RH=IN"")"
-    chainSheet.Range("C2").Value = "Downloading..."
+    g_ChainSheet.Range("A2").Value = chainRIC
+    g_ChainSheet.Range("B2").Formula = "=@TR(""" & chainRIC & """,""CF_NAME"",""CH=Fd RH=IN"")"
+    g_ChainSheet.Range("C2").Value = "Downloading chains..."
 
-    Application.StatusBar = "Downloading option chain of chains for " & rootRIC & "..."
+    Application.StatusBar = "Downloading option chain of chains for " & g_ChainRootRIC & "..."
 
-    ' Refresh the chain data
-    RefreshLSEGWithTimeout chainSheet, 120
+    ' Set state to downloading chains
+    g_ChainState = CHAIN_STATE_DOWNLOADING_CHAINS
+    g_ChainRefreshCheckCount = 0
 
-    ' Wait for refresh to complete
-    Application.Wait Now + TimeValue("00:00:05")
+    ' Trigger LSEG refresh (non-blocking call)
+    Application.Run "WorkspaceRefreshWorksheet", True, 120000, g_ChainSheet.Name
 
-    ' Check if data was downloaded
-    If IsEmpty(chainSheet.Range("B3").Value) Or chainSheet.Range("B3").Value = "0" Then
-        chainSheet.Range("C2").Value = "No data"
-        MsgBox "No option chain data found for " & rootRIC & ". Please check if the root RIC is correct.", vbExclamation
+    ' Schedule check via OnTime (non-blocking - allows LSEG to populate data)
+    Application.OnTime Now + TimeValue("00:00:05"), "DownloadFromChain_CheckChainReady"
+
+    ' VBA execution ends here - OnTime chain runs asynchronously
+    Exit Sub
+
+ErrorHandler:
+    g_ChainState = CHAIN_STATE_IDLE
+    Application.StatusBar = False
+    MsgBox "Error in DownloadFromChain: " & Err.Description & vbNewLine & _
+           "Error Number: " & Err.Number, vbCritical
+    If Not g_ChainSheet Is Nothing Then
+        g_ChainSheet.Range("C2").Value = "Error: " & Err.Description
+    End If
+End Sub
+
+' ============================================
+' PHASE 1: Check if chain-of-chains data is ready
+' ============================================
+Sub DownloadFromChain_CheckChainReady()
+    Dim readyCount As Long
+    Dim totalCount As Long
+
+    ' Force recalculation before checking
+    g_ChainSheet.Calculate
+
+    ' Check stop flag
+    If g_ChainStopRequested Then
+        DownloadFromChain_Abort
+        Exit Sub
+    End If
+
+    ' Check timeout (60 checks x 3 sec = ~3 min)
+    g_ChainRefreshCheckCount = g_ChainRefreshCheckCount + 1
+    If g_ChainRefreshCheckCount > 60 Then
+        Application.StatusBar = "Chain download timeout - proceeding anyway..."
+        DownloadFromChain_ProcessChains
+        Exit Sub
+    End If
+
+    ' Check if chain data is ready (look for data in B3)
+    If Not IsEmpty(g_ChainSheet.Range("B3").Value) And g_ChainSheet.Range("B3").Value <> "0" Then
+        ' Data ready, proceed to process chains
+        Application.StatusBar = "Chain data ready - processing..."
+        DownloadFromChain_ProcessChains
+    Else
+        ' Still waiting, check for LSEG status messages
+        Dim cellText As String
+        cellText = CStr(g_ChainSheet.Range("B2").Text)
+
+        If InStr(1, cellText, "Retrieving", vbTextCompare) > 0 Or _
+           InStr(1, cellText, "Requesting", vbTextCompare) > 0 Or _
+           InStr(1, cellText, "Loading", vbTextCompare) > 0 Then
+            ' Still downloading
+            Application.StatusBar = "Downloading chains... (check #" & g_ChainRefreshCheckCount & ")"
+        Else
+            Application.StatusBar = "Waiting for chain data... (check #" & g_ChainRefreshCheckCount & ")"
+        End If
+
+        ' Reschedule check
+        Application.OnTime Now + TimeValue("00:00:03"), "DownloadFromChain_CheckChainReady"
+    End If
+End Sub
+
+' ============================================
+' PHASE 2: Process chains and setup option downloads
+' ============================================
+Sub DownloadFromChain_ProcessChains()
+    Dim lastRow As Long
+    Dim i As Long
+    Dim chainRICCode As String
+    Dim cleanChainRIC As String
+    Dim optionColumn As Long
+
+    On Error GoTo ErrorHandler
+
+    ' Check if data was actually downloaded
+    If IsEmpty(g_ChainSheet.Range("B3").Value) Or g_ChainSheet.Range("B3").Value = "0" Then
+        g_ChainSheet.Range("C2").Value = "No data"
+        MsgBox "No option chain data found for " & g_ChainRootRIC & ". Please check if the root RIC is correct.", vbExclamation
+        g_ChainState = CHAIN_STATE_IDLE
         Application.StatusBar = False
         Exit Sub
     End If
 
-    chainSheet.Range("C2").Value = "Processing..."
+    g_ChainState = CHAIN_STATE_PROCESSING_CHAINS
+    g_ChainSheet.Range("C2").Value = "Processing chains..."
+    Application.StatusBar = "Processing chain data..."
 
-    ' Process the downloaded chain data
-    ProcessChainData chainSheet
+    ' Setup RIC_List sheet
+    Set g_RICListSheet = SetupRICListSheetForChain()
 
+    ' Find last row with data in chain sheet
+    lastRow = g_ChainSheet.Cells(g_ChainSheet.Rows.count, "B").End(xlUp).Row
+
+    ' Setup headers for Stage 2 processing
+    g_ChainSheet.Range("D1").Value = "Chain Index"
+    g_ChainSheet.Range("E1").Value = "Clean Chain RIC"
+    g_ChainSheet.Range("F1").Value = "Option Column"
+
+    g_ChainIndex = 0
+
+    ' Process each chain RIC and setup option download formulas
+    For i = 3 To lastRow
+        chainRICCode = Trim(CStr(g_ChainSheet.Cells(i, 2).Value))
+
+        If chainRICCode = "" Or chainRICCode = "0" Then GoTo NextChainRIC
+
+        ' Extract clean chain RIC
+        If Left(chainRICCode, 1) = "/" Then
+            cleanChainRIC = Mid(chainRICCode, 2)
+        Else
+            cleanChainRIC = chainRICCode
+        End If
+
+        ' Calculate option column
+        optionColumn = 7 + g_ChainIndex * g_ChainStepSize
+
+        ' Add column header
+        g_ChainSheet.Cells(1, optionColumn).Value = "Chain " & g_ChainIndex & " (" & cleanChainRIC & ")"
+
+        ' Add TR formula to download options from this chain
+        Application.StatusBar = "Setting up option download for chain " & g_ChainIndex & ": " & cleanChainRIC
+        DownloadOptionsFromSingleChain g_ChainSheet, optionColumn, cleanChainRIC
+
+        g_ChainIndex = g_ChainIndex + 1
+
+NextChainRIC:
+    Next i
+
+    g_ChainTotalChains = g_ChainIndex
+    g_ChainSheet.Range("C2").Value = "Downloading " & g_ChainTotalChains & " option chains..."
+
+    ' Set state and trigger refresh for options
+    g_ChainState = CHAIN_STATE_DOWNLOADING_OPTIONS
+    g_ChainRefreshCheckCount = 0
+
+    Application.StatusBar = "Refreshing LSEG data for " & g_ChainTotalChains & " option chains..."
+
+    ' Trigger LSEG refresh (non-blocking)
+    Application.Run "WorkspaceRefreshWorksheet", True, 120000, g_ChainSheet.Name
+
+    ' Schedule check via OnTime
+    Application.OnTime Now + TimeValue("00:00:05"), "DownloadFromChain_CheckOptionsReady"
+    Exit Sub
+
+ErrorHandler:
+    g_ChainState = CHAIN_STATE_IDLE
     Application.StatusBar = False
+    MsgBox "Error in DownloadFromChain_ProcessChains: " & Err.Description, vbCritical
+End Sub
+
+' ============================================
+' PHASE 3: Check if option data is ready
+' ============================================
+Sub DownloadFromChain_CheckOptionsReady()
+    Dim readyCount As Long
+    Dim totalCount As Long
+
+    ' Force recalculation before checking
+    g_ChainSheet.Calculate
+
+    ' Check stop flag
+    If g_ChainStopRequested Then
+        DownloadFromChain_Abort
+        Exit Sub
+    End If
+
+    ' Check timeout
+    g_ChainRefreshCheckCount = g_ChainRefreshCheckCount + 1
+    If g_ChainRefreshCheckCount > 60 Then
+        Application.StatusBar = "Options download timeout - proceeding anyway..."
+        ' Schedule Complete via OnTime to allow data to settle
+        Application.OnTime Now + TimeValue("00:00:02"), "DownloadFromChain_Complete"
+        Exit Sub
+    End If
+
+    ' Check if option data is ready using IsLSEGDataReady
+    If IsLSEGDataReady(g_ChainSheet, readyCount, totalCount, 10) Then
+        Application.StatusBar = "Option data ready (" & readyCount & "/" & totalCount & ") - finalizing in 2 seconds..."
+        ' Schedule Complete via OnTime to allow data to settle
+        Application.OnTime Now + TimeValue("00:00:02"), "DownloadFromChain_Complete"
+    Else
+        Application.StatusBar = "Downloading options... " & readyCount & " of " & totalCount & " ready (check #" & g_ChainRefreshCheckCount & ")"
+        ' Reschedule check
+        Application.OnTime Now + TimeValue("00:00:03"), "DownloadFromChain_CheckOptionsReady"
+    End If
+End Sub
+
+' ============================================
+' PHASE 4: Complete - process option data to RIC_List
+' ============================================
+Sub DownloadFromChain_Complete()
+    On Error GoTo ErrorHandler
+
+    g_ChainState = CHAIN_STATE_PROCESSING_OPTIONS
+    g_ChainSheet.Range("C2").Value = "Processing options..."
+    Application.StatusBar = "Processing option data to RIC_List..."
+
+    ' Process all downloaded option data
+    ProcessAllOptionDataByColumns g_ChainSheet, g_RICListSheet, g_ChainTotalChains, g_ChainStepSize
+
+    ' Reset state
+    g_ChainState = CHAIN_STATE_IDLE
+    g_ChainSheet.Range("C2").Value = "Complete"
+    Application.StatusBar = False
+
     MsgBox "Option chain download complete! Check " & SHEET_RIC_LIST & " sheet for results.", vbInformation
     Exit Sub
 
 ErrorHandler:
+    g_ChainState = CHAIN_STATE_IDLE
     Application.StatusBar = False
-    MsgBox "Error in DownloadFromChain: " & Err.Description & vbNewLine & _
-           "Error Number: " & Err.Number, vbCritical
-    If Not chainSheet Is Nothing Then
-        chainSheet.Range("C2").Value = "Error: " & Err.Description
-    End If
+    MsgBox "Error in DownloadFromChain_Complete: " & Err.Description, vbCritical
+End Sub
+
+' ============================================
+' Stop handler for DownloadFromChain
+' ============================================
+Sub StopDownloadFromChain()
+    g_ChainStopRequested = True
+    Application.StatusBar = "Stop requested - will halt after current operation..."
+    MsgBox "Download will stop after current phase completes.", vbInformation
+End Sub
+
+' ============================================
+' Abort handler for DownloadFromChain
+' ============================================
+Sub DownloadFromChain_Abort()
+    g_ChainState = CHAIN_STATE_IDLE
+    g_ChainStopRequested = False
+    Application.StatusBar = False
+    MsgBox "Download stopped.", vbInformation
 End Sub
 
 ' ============================================
@@ -675,6 +904,8 @@ Sub ProcessAllOptionDataByColumns(chainSheet As Worksheet, ricListSheet As Works
     errorCount = 0
     startColumn = 7  ' Options start from column G
 
+    chainSheet.Calculate
+
     If totalChains = 0 Then
         MsgBox "No chains found to process.", vbExclamation
         Exit Sub
@@ -754,6 +985,7 @@ Sub ProcessSingleColumnOptions(chainSheet As Worksheet, ricListSheet As Workshee
             .Cells(ricListRow, 8).Value = "No"  ' Processed
         End With
         ricListRow = ricListRow + 1
+        totalOptions = totalOptions + 1
 
 NextOptionRow:
     Next i
@@ -853,11 +1085,3 @@ Function GetPutCallFromTRResult(chainSheet As Worksheet, rowNum As Long) As Stri
         GetPutCallFromTRResult = ""
     End If
 End Function
-
-
-
-
-
-
-
-

@@ -57,7 +57,7 @@ Sub RefreshLSEGWithTimeout(ws As Worksheet, Optional timeoutSeconds As Long = 12
         If checkCounter Mod 5 = 0 Then  ' Every 5th iteration
             Application.Wait Now + TimeValue("0:00:02")
         Else
-            Application.Wait Now + TimeValue("0:00:00.5")  ' 0.5 second pause
+            Application.Wait Now + TimeValue("0:00:01")  ' 1 second pause
         End If
     Loop
     
@@ -158,4 +158,6 @@ Function IsLSEGDataReady(ws As Worksheet, Optional ByRef readyCount As Long, Opt
     ' Consider ready if ALL checked cells are no longer retrieving
     IsLSEGDataReady = (cellsChecked > 0 And cellsReady = cellsChecked)
 End Function
+
+
 
