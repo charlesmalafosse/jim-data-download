@@ -9,18 +9,33 @@ Public Function GBlackScholesImpVolBisection(CallPutFlag As String, S As Double,
     Dim vLow As Double, vHigh As Double, vi As Double
     Dim cLow As Double, cHigh As Double, epsilon As Double
     Dim counter As Integer
-    
+
+    On Error GoTo ErrorHandler
+
+    ' Validate inputs to avoid divide by zero
+    If T <= 0 Or S <= 0 Or x <= 0 Or cm <= 0 Then
+        GBlackScholesImpVolBisection = CVErr(xlErrNA)
+        Exit Function
+    End If
+
     vLow = 0.005
     vHigh = 4
     epsilon = 0.00000001
     cLow = GBlackScholes(CallPutFlag, S, x, T, r, b, vLow)
     cHigh = GBlackScholes(CallPutFlag, S, x, T, r, b, vHigh)
+
+    ' Check for divide by zero
+    If cHigh = cLow Then
+        GBlackScholesImpVolBisection = CVErr(xlErrNA)
+        Exit Function
+    End If
+
     counter = 0
     vi = vLow + (cm - cLow) * (vHigh - vLow) / (cHigh - cLow)
     While Abs(cm - GBlackScholes(CallPutFlag, S, x, T, r, b, vi)) > epsilon
         counter = counter + 1
         If counter = 10000 Then
-            GBlackScholesImpVolBisection = "NA"
+            GBlackScholesImpVolBisection = CVErr(xlErrNA)
             Exit Function
         End If
         If GBlackScholes(CallPutFlag, S, x, T, r, b, vi) < cm Then
@@ -30,9 +45,19 @@ Public Function GBlackScholesImpVolBisection(CallPutFlag As String, S As Double,
         End If
         cLow = GBlackScholes(CallPutFlag, S, x, T, r, b, vLow)
         cHigh = GBlackScholes(CallPutFlag, S, x, T, r, b, vHigh)
+
+        ' Check for divide by zero in loop
+        If cHigh = cLow Then
+            GBlackScholesImpVolBisection = CVErr(xlErrNA)
+            Exit Function
+        End If
+
         vi = vLow + (cm - cLow) * (vHigh - vLow) / (cHigh - cLow)
     Wend
     GBlackScholesImpVolBisection = vi
-    
+    Exit Function
+
+ErrorHandler:
+    GBlackScholesImpVolBisection = CVErr(xlErrNA)
 End Function
 

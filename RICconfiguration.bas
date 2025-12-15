@@ -88,19 +88,18 @@ Sub GenerateAllRICs()
             .Cells(i, 4).Value = ricDict("OptionType")
             .Cells(i, 5).Value = ricDict("MonthCode")
             .Cells(i, 6).Value = ricDict("YearCode")
-            ' Add RData formula to check if RIC exists
-            .Cells(i, 7).Formula = "=@TR(A" & i & ",""UNDERLYING"")"
+            ' Column G (Underlying) left empty - no LSEG formula needed
             ' Initialize Processed column as "No" or empty
             .Cells(i, 8).Value = "No"
         End With
         i = i + 1
     Next
-    
+
     ' Format
-    outputSheet.Columns("A:H").AutoFit  ' Updated to include column H
+    outputSheet.Columns("A:H").AutoFit
     outputSheet.Range("B:B").NumberFormat = "mm/dd/yyyy"
     outputSheet.Range("C:C").NumberFormat = "#,##0"
-    
+
     ' Add conditional formatting to Processed column for visual feedback
     With outputSheet.Range("H2:H" & ricList.count + 1).FormatConditions
         .Delete
@@ -114,16 +113,9 @@ Sub GenerateAllRICs()
         .Add Type:=xlTextString, String:="Processing", TextOperator:=xlContains
         .Item(.count).Interior.Color = RGB(255, 255, 200)
     End With
-    
-    
-    ' Refresh the chain data
-    Dim wsRIC As Worksheet
-    Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
-    RefreshLSEGWithTimeout wsRIC, 120
-    
+
     MsgBox "Generated " & ricList.count & " RICs!" & vbNewLine & _
            "Check '" & SHEET_RIC_LIST & "' sheet for details." & vbNewLine & _
-           "Column G will show maturity dates for valid RICs after LSEG refresh." & vbNewLine & _
            "Column H tracks processing status.", vbInformation
 End Sub
 
@@ -174,17 +166,24 @@ Function CreateRICInfo(maturityDate As Date, strike As Double, optionType As Str
     Dim yearCode As String
     Dim strikeStr As String
     Dim ricDict As Object
-    
+    Dim ricMonth As Integer
+
     ' Create dictionary to hold RIC information
     Set ricDict = CreateObject("Scripting.Dictionary")
-    
+
     ' Get values
     rootRIC = ThisWorkbook.Sheets(SHEET_CONFIG).Range("rootRIC").Value
-    monthCode = GetMonthCodeFromTable(Month(maturityDate), optionType)
-    monthCodeCallForExpiredRIC = GetMonthCodeFromTable(Month(maturityDate), "CALL")
+
+    ' Use the FOLLOWING month for month code (e.g., November maturity -> December code)
+    ' Month 12 wraps to Month 1
+    ricMonth = Month(maturityDate) + 1
+    If ricMonth > 12 Then ricMonth = 1
+
+    monthCode = GetMonthCodeFromTable(ricMonth, optionType)
+    monthCodeCallForExpiredRIC = GetMonthCodeFromTable(ricMonth, "CALL")
     yearCode = Right(CStr(Year(maturityDate)), 2)
     strikeStr = FormatStrikeForRIC(strike)
-    
+
     ' Populate dictionary
     ricDict.Add "FullRIC", BuildRICString(rootRIC, strikeStr, monthCode, yearCode, maturityDate, monthCodeCallForExpiredRIC)
     ricDict.Add "Maturity", maturityDate
@@ -192,7 +191,7 @@ Function CreateRICInfo(maturityDate As Date, strike As Double, optionType As Str
     ricDict.Add "OptionType", optionType
     ricDict.Add "MonthCode", monthCode
     ricDict.Add "YearCode", yearCode
-    
+
     Set CreateRICInfo = ricDict
 End Function
 
@@ -220,13 +219,20 @@ End Function
 
 Function FormatStrikeForRIC(strike As Double) As String
     Dim strikeStr As String
-    
-    If strike = Int(strike) Then
-        strikeStr = CStr(Int(strike))
+
+    ' Strike formatting: 5 characters with 2 decimals, unless strike > 999.999 then 1 decimal
+    ' Examples: 100.00 -> "10000", 75.50 -> "7550", 1500.5 -> "15005"
+    If strike > 999.999 Then
+        ' 1 decimal place for large strikes
+        strikeStr = Format(strike, "0.0")
     Else
-        strikeStr = Replace(CStr(strike), ".", "")
+        ' 2 decimal places for smaller strikes
+        strikeStr = Format(strike, "0.00")
     End If
-    
+
+    ' Remove decimal point
+    strikeStr = Replace(strikeStr, ".", "")
+
     FormatStrikeForRIC = strikeStr
 End Function
 

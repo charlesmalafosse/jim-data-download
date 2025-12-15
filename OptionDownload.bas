@@ -1,4 +1,3 @@
-Attribute VB_Name = "OptionDownload"
 ' ============================================
 ' MODULE 1: Global Configuration and Types
 ' ============================================
@@ -41,12 +40,6 @@ Public g_FormulaCount As Long
 Public g_StopRequested As Boolean
 Public g_NextScheduledProc As String
 Public g_RefreshCheckCount As Long
-
-' OnTime Chain State for RefreshFutureUnderlyings
-Public g_FutureSheet As Worksheet
-Public g_FutureUnderlyingCount As Long
-Public g_FutureRefreshCheckCount As Long
-Public g_FutureStopRequested As Boolean
 
 ' Sheet Names
 Public Const SHEET_CONFIG As String = "Config"
@@ -106,8 +99,6 @@ Sub RefreshFutureSheet()
 End Sub
 
 Sub RefreshFutureUnderlyings()
-    ' Downloads underlying futures data from LSEG
-    ' Uses OnTime chain pattern for async LSEG refresh (non-blocking)
     Dim wsRIC As Worksheet
     Dim wsFuture As Worksheet
     Dim wsConfig As Worksheet
@@ -131,17 +122,10 @@ Sub RefreshFutureUnderlyings()
 
     On Error GoTo ErrorHandler
 
-    ' Initialize state
-    g_FutureStopRequested = False
-    g_FutureRefreshCheckCount = 0
-
     Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
     Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
     Set wsConfig = ThisWorkbook.Worksheets(SHEET_CONFIG)
     Set uniqueUnderlyings = New Collection
-
-    ' Store sheet reference for OnTime callbacks
-    Set g_FutureSheet = wsFuture
 
     ' Step 1: Extract unique underlyings from RIC_List column G
     Application.StatusBar = "Extracting unique underlyings from RIC_List..."
@@ -280,88 +264,20 @@ Sub RefreshFutureUnderlyings()
         currentCol = currentCol + 3
     Next i
 
-    ' Store count for completion message
-    g_FutureUnderlyingCount = arraySize
-
-    ' Step 6: Refresh LSEG workspace (non-blocking)
+    ' Step 6: Refresh LSEG workspace
     Application.StatusBar = "Refreshing LSEG data for " & arraySize & " underlyings..."
+    RefreshLSEGWithTimeout wsFuture, 120
 
-    ' Trigger LSEG refresh (non-blocking call)
-    Application.Run "WorkspaceRefreshWorksheet", True, 120000, wsFuture.Name
+    MsgBox "Added " & arraySize & " underlyings to SHEET_FUTURE in alphabetical order." & vbNewLine & _
+           "Data refresh complete. Please verify the downloaded data." & vbNewLine & _
+           "IMPORTANT: Add Bloomberg equivalent for underlying RICs in RicBloomberg range.", vbInformation
 
-    ' Schedule check via OnTime (non-blocking - allows LSEG to populate data)
-    Application.OnTime Now + TimeValue("00:00:05"), "RefreshFutureUnderlyings_CheckReady"
-
-    ' VBA execution ends here - OnTime chain runs asynchronously
+    Application.StatusBar = False
     Exit Sub
 
 ErrorHandler:
     Application.StatusBar = False
     MsgBox "Error in RefreshFutureUnderlyings: " & Err.Description, vbExclamation
-End Sub
-
-' ============================================
-' Check if Future Underlyings data is ready
-' ============================================
-Sub RefreshFutureUnderlyings_CheckReady()
-    Dim readyCount As Long
-    Dim totalCount As Long
-
-    ' Force recalculation before checking
-    g_FutureSheet.Calculate
-
-    ' Check stop flag
-    If g_FutureStopRequested Then
-        RefreshFutureUnderlyings_Abort
-        Exit Sub
-    End If
-
-    ' Check timeout (60 checks x 3 sec = ~3 min)
-    g_FutureRefreshCheckCount = g_FutureRefreshCheckCount + 1
-    If g_FutureRefreshCheckCount > 60 Then
-        Application.StatusBar = "Underlyings download timeout - completing anyway..."
-        RefreshFutureUnderlyings_Complete
-        Exit Sub
-    End If
-
-    ' Check if data is ready using IsLSEGDataReady
-    If IsLSEGDataReady(g_FutureSheet, readyCount, totalCount, 10) Then
-        Application.StatusBar = "Underlying data ready (" & readyCount & "/" & totalCount & ") - completing..."
-        RefreshFutureUnderlyings_Complete
-    Else
-        Application.StatusBar = "Downloading underlyings... " & readyCount & " of " & totalCount & " ready (check #" & g_FutureRefreshCheckCount & ")"
-        ' Reschedule check
-        Application.OnTime Now + TimeValue("00:00:03"), "RefreshFutureUnderlyings_CheckReady"
-    End If
-End Sub
-
-' ============================================
-' Complete Future Underlyings refresh
-' ============================================
-Sub RefreshFutureUnderlyings_Complete()
-    Application.StatusBar = False
-
-    MsgBox "Added " & g_FutureUnderlyingCount & " underlyings to " & SHEET_FUTURE & " in alphabetical order." & vbNewLine & _
-           "Data refresh complete. Please verify the downloaded data." & vbNewLine & _
-           "IMPORTANT: Add Bloomberg equivalent for underlying RICs in RicBloomberg range.", vbInformation
-End Sub
-
-' ============================================
-' Stop handler for RefreshFutureUnderlyings
-' ============================================
-Sub StopRefreshFutureUnderlyings()
-    g_FutureStopRequested = True
-    Application.StatusBar = "Stop requested - will halt after current operation..."
-    MsgBox "Download will stop after current check completes.", vbInformation
-End Sub
-
-' ============================================
-' Abort handler for RefreshFutureUnderlyings
-' ============================================
-Sub RefreshFutureUnderlyings_Abort()
-    g_FutureStopRequested = False
-    Application.StatusBar = False
-    MsgBox "Underlyings download stopped.", vbInformation
 End Sub
 
 
@@ -592,11 +508,6 @@ Sub ProcessBatch_CheckRefresh()
     Dim readyCount As Long
     Dim totalChecks As Long
 
-    Set wsCollection = ThisWorkbook.Worksheets(SHEET_COLLECTION)
-
-    ' Force recalculation before checking
-    wsCollection.Calculate
-
     ' Check stop flag
     If g_StopRequested Then
         ProcessBatch_Abort
@@ -605,17 +516,21 @@ Sub ProcessBatch_CheckRefresh()
 
     ' Check timeout
     g_RefreshCheckCount = g_RefreshCheckCount + 1
-    If g_RefreshCheckCount > 60 Then  ' 60 checks � 3 sec = 3 min timeout
+    If g_RefreshCheckCount > 60 Then  ' 60 checks × 3 sec = 3 min timeout
         MsgBox "LSEG refresh timeout for batch #" & g_BatchCounter & " - proceeding anyway", vbExclamation
-        ProcessBatch_ProcessResults
+        ' Schedule via OnTime to let LSEG finish populating all columns
+        Application.OnTime Now + TimeValue("00:00:02"), "ProcessBatch_ProcessResults"
         Exit Sub
     End If
 
+    Set wsCollection = ThisWorkbook.Worksheets(SHEET_COLLECTION)
+    wsCollection.Calculate
+
     ' Check if data ready (with progress tracking)
     If IsDataReady(wsCollection, readyCount, totalChecks) Then
-        ' Data ready, proceed
-        Application.StatusBar = "Batch #" & g_BatchCounter & ": All data ready (" & readyCount & "/" & totalChecks & " cells) - processing..."
-        ProcessBatch_ProcessResults
+        ' Data ready, schedule processing via OnTime to let LSEG finish populating all columns
+        Application.StatusBar = "Batch #" & g_BatchCounter & ": All data ready (" & readyCount & "/" & totalChecks & " cells) - processing in 2 seconds..."
+        Application.OnTime Now + TimeValue("00:00:02"), "ProcessBatch_ProcessResults"
     Else
         ' Still waiting, reschedule - show progress in status bar
         Application.StatusBar = "Batch #" & g_BatchCounter & ": Waiting for LSEG data... " & _
@@ -980,9 +895,10 @@ Sub AddGreekFormulasToDataRows(ws As Worksheet, startRow As Long, maxRows As Lon
     firstDataRow = 0
     lastDataRow = 0
 
-    ' Find first and last rows with premium data
+    ' Find first and last rows with premium data (skip errors like #N/A)
     For i = startRow To endRow
-        If Not IsEmpty(ws.Cells(i, 1).Value) And Not IsEmpty(ws.Cells(i, 2).Value) Then
+        If Not IsEmpty(ws.Cells(i, 1).Value) And Not IsError(ws.Cells(i, 1).Value) And _
+           Not IsEmpty(ws.Cells(i, 2).Value) And Not IsError(ws.Cells(i, 2).Value) Then
             If firstDataRow = 0 Then firstDataRow = i
             lastDataRow = i
         ElseIf firstDataRow > 0 Then
@@ -998,57 +914,57 @@ Sub AddGreekFormulasToDataRows(ws As Worksheet, startRow As Long, maxRows As Lon
     ' Use R1C1 notation for relative formulas - much faster!
     ' Add Greek formulas to the data range only
 
-    ' Column I (9): Implied Volatility
+    ' Column I (9): Implied Volatility (handle #N/A errors and calc errors)
     ws.Range(ws.Cells(firstDataRow, 9), ws.Cells(lastDataRow, 9)).FormulaR1C1 = _
-        "=IF(RC[-7]="""","""",GBlackScholesImpVolBisection(LOWER(RC[-1]),RC[-3],RC[-2],(RC[-5]-RC[-8])/365,RC[-4],0,RC[-7]))"
+        "=IF(OR(RC[-7]="""",ISERROR(RC[-7])),"""",IFERROR(GBlackScholesImpVolBisection(LOWER(RC[-1]),RC[-3],RC[-2],(RC[-5]-RC[-8])/365,RC[-4],0,RC[-7]),""NA""))"
 
     ' Column J (10): Delta
     ws.Range(ws.Cells(firstDataRow, 10), ws.Cells(lastDataRow, 10)).FormulaR1C1 = _
-        "=IF(RC[-8]="""","""",GBlackScholesNGreeks(""d"",LOWER(RC[-2]),RC[-4],RC[-3],(RC[-6]-RC[-9])/365,RC[-5],0,RC[-1]))"
+        "=IF(OR(RC[-8]="""",ISERROR(RC[-8])),"""",IFERROR(GBlackScholesNGreeks(""d"",LOWER(RC[-2]),RC[-4],RC[-3],(RC[-6]-RC[-9])/365,RC[-5],0,RC[-1]),""NA""))"
 
     ' Column K (11): Vega
     ws.Range(ws.Cells(firstDataRow, 11), ws.Cells(lastDataRow, 11)).FormulaR1C1 = _
-        "=IF(RC[-9]="""","""",GBlackScholesNGreeks(""v"",LOWER(RC[-3]),RC[-5],RC[-4],(RC[-7]-RC[-10])/365,RC[-6],0,RC[-2]))"
+        "=IF(OR(RC[-9]="""",ISERROR(RC[-9])),"""",IFERROR(GBlackScholesNGreeks(""v"",LOWER(RC[-3]),RC[-5],RC[-4],(RC[-7]-RC[-10])/365,RC[-6],0,RC[-2]),""NA""))"
 
     ' Column L (12): Gamma
     ws.Range(ws.Cells(firstDataRow, 12), ws.Cells(lastDataRow, 12)).FormulaR1C1 = _
-        "=IF(RC[-10]="""","""",GBlackScholesNGreeks(""g"",LOWER(RC[-4]),RC[-6],RC[-5],(RC[-8]-RC[-11])/365,RC[-7],0,RC[-3]))"
+        "=IF(OR(RC[-10]="""",ISERROR(RC[-10])),"""",IFERROR(GBlackScholesNGreeks(""g"",LOWER(RC[-4]),RC[-6],RC[-5],(RC[-8]-RC[-11])/365,RC[-7],0,RC[-3]),""NA""))"
 
     ' Column M (13): Theta
     ws.Range(ws.Cells(firstDataRow, 13), ws.Cells(lastDataRow, 13)).FormulaR1C1 = _
-        "=IF(RC[-11]="""","""",GBlackScholesNGreeks(""t"",LOWER(RC[-5]),RC[-7],RC[-6],(RC[-9]-RC[-12])/365,RC[-8],0,RC[-4]))"
+        "=IF(OR(RC[-11]="""",ISERROR(RC[-11])),"""",IFERROR(GBlackScholesNGreeks(""t"",LOWER(RC[-5]),RC[-7],RC[-6],(RC[-9]-RC[-12])/365,RC[-8],0,RC[-4]),""NA""))"
 
     ' Column N (14): Rho
     ws.Range(ws.Cells(firstDataRow, 14), ws.Cells(lastDataRow, 14)).FormulaR1C1 = _
-        "=IF(RC[-12]="""","""",GBlackScholesNGreeks(""r"",LOWER(RC[-6]),RC[-8],RC[-7],(RC[-10]-RC[-13])/365,RC[-9],0,RC[-5]))"
+        "=IF(OR(RC[-12]="""",ISERROR(RC[-12])),"""",IFERROR(GBlackScholesNGreeks(""r"",LOWER(RC[-6]),RC[-8],RC[-7],(RC[-10]-RC[-13])/365,RC[-9],0,RC[-5]),""NA""))"
 
     ' Column V (22): DDELTA/DVOL
     ws.Range(ws.Cells(firstDataRow, 22), ws.Cells(lastDataRow, 22)).FormulaR1C1 = _
-        "=IF(RC[-20]="""","""",CGBlackScholes(""dddv"",LOWER(RC[-14]),RC[-16],RC[-15],(RC[-18]-RC[-21])/365,RC[-17],0,RC[-13],RC[-12]))"
+        "=IF(OR(RC[-20]="""",ISERROR(RC[-20])),"""",IFERROR(CGBlackScholes(""dddv"",LOWER(RC[-14]),RC[-16],RC[-15],(RC[-18]-RC[-21])/365,RC[-17],0,RC[-13],RC[-12]),""NA""))"
 
     ' Column W (23): DDELTA/DVOLDVOL
     ws.Range(ws.Cells(firstDataRow, 23), ws.Cells(lastDataRow, 23)).FormulaR1C1 = _
-        "=IF(RC[-21]="""","""",CGBlackScholes(""dvv"",LOWER(RC[-15]),RC[-17],RC[-16],(RC[-19]-RC[-22])/365,RC[-18],0,RC[-14],RC[-13]))"
+        "=IF(OR(RC[-21]="""",ISERROR(RC[-21])),"""",IFERROR(CGBlackScholes(""dvv"",LOWER(RC[-15]),RC[-17],RC[-16],(RC[-19]-RC[-22])/365,RC[-18],0,RC[-14],RC[-13]),""NA""))"
 
     ' Column X (24): Charm (DDELTA/DTIME)
     ws.Range(ws.Cells(firstDataRow, 24), ws.Cells(lastDataRow, 24)).FormulaR1C1 = _
-        "=IF(RC[-22]="""","""",CGBlackScholes(""dt"",LOWER(RC[-16]),RC[-18],RC[-17],(RC[-20]-RC[-23])/365,RC[-19],0,RC[-15],RC[-14]))"
+        "=IF(OR(RC[-22]="""",ISERROR(RC[-22])),"""",IFERROR(CGBlackScholes(""dt"",LOWER(RC[-16]),RC[-18],RC[-17],(RC[-20]-RC[-23])/365,RC[-19],0,RC[-15],RC[-14]),""NA""))"
 
     ' Column Y (25): DGamma/DSpot
     ws.Range(ws.Cells(firstDataRow, 25), ws.Cells(lastDataRow, 25)).FormulaR1C1 = _
-        "=IF(RC[-23]="""","""",CGBlackScholes(""gps"",LOWER(RC[-17]),RC[-19],RC[-18],(RC[-21]-RC[-24])/365,RC[-20],0,RC[-16],RC[-15]))"
+        "=IF(OR(RC[-23]="""",ISERROR(RC[-23])),"""",IFERROR(CGBlackScholes(""gps"",LOWER(RC[-17]),RC[-19],RC[-18],(RC[-21]-RC[-24])/365,RC[-20],0,RC[-16],RC[-15]),""NA""))"
 
     ' Column Z (26): Zomma (DGAMMA/DVOL)
     ws.Range(ws.Cells(firstDataRow, 26), ws.Cells(lastDataRow, 26)).FormulaR1C1 = _
-        "=IF(RC[-24]="""","""",CGBlackScholes(""gpv"",LOWER(RC[-18]),RC[-20],RC[-19],(RC[-22]-RC[-25])/365,RC[-21],0,RC[-17],RC[-16]))"
+        "=IF(OR(RC[-24]="""",ISERROR(RC[-24])),"""",IFERROR(CGBlackScholes(""gpv"",LOWER(RC[-18]),RC[-20],RC[-19],(RC[-22]-RC[-25])/365,RC[-21],0,RC[-17],RC[-16]),""NA""))"
 
     ' Column AA (27): Vomma (DVEGA/DVOL)
     ws.Range(ws.Cells(firstDataRow, 27), ws.Cells(lastDataRow, 27)).FormulaR1C1 = _
-        "=IF(RC[-25]="""","""",CGBlackScholes(""dvdv"",LOWER(RC[-19]),RC[-21],RC[-20],(RC[-23]-RC[-26])/365,RC[-22],0,RC[-18],RC[-17]))"
+        "=IF(OR(RC[-25]="""",ISERROR(RC[-25])),"""",IFERROR(CGBlackScholes(""dvdv"",LOWER(RC[-19]),RC[-21],RC[-20],(RC[-23]-RC[-26])/365,RC[-22],0,RC[-18],RC[-17]),""NA""))"
 
     ' Column AB (28): Ultima (DVEGA/DVOLDVOL)
     ws.Range(ws.Cells(firstDataRow, 28), ws.Cells(lastDataRow, 28)).FormulaR1C1 = _
-        "=IF(RC[-26]="""","""",CGBlackScholes(""vvv"",LOWER(RC[-20]),RC[-22],RC[-21],(RC[-24]-RC[-27])/365,RC[-23],0,RC[-19],RC[-18]))"
+        "=IF(OR(RC[-26]="""",ISERROR(RC[-26])),"""",IFERROR(CGBlackScholes(""vvv"",LOWER(RC[-20]),RC[-22],RC[-21],(RC[-24]-RC[-27])/365,RC[-23],0,RC[-19],RC[-18]),""NA""))"
 
     ' Calculate the worksheet to populate formulas
     'ws.Calculate
@@ -1066,14 +982,16 @@ Sub CopyDataRowsToStaging(ws As Worksheet, startRow As Long, maxRows As Long)
     Dim endRow As Long
     Dim wsDest As Worksheet
     Dim NextRow As Long
+    Dim cellVal As Variant
 
     Set wsDest = ThisWorkbook.Worksheets(SHEET_STAGING)
 
     endRow = startRow + maxRows - 1
 
-    ' Copy only rows that have premium data
+    ' Copy only rows that have valid premium data (not empty, not error)
     For i = startRow To endRow
-        If Not IsEmpty(ws.Cells(i, 2).Value) And IsNumeric(ws.Cells(i, 2).Value) Then
+        cellVal = ws.Cells(i, 2).Value
+        If Not IsEmpty(cellVal) And Not IsError(cellVal) And IsNumeric(cellVal) Then
             ' This row has LSEG data, copy it to staging with proper column mapping
             NextRow = wsDest.Cells(wsDest.Rows.count, 1).End(xlUp).Row + 1
 
@@ -1107,8 +1025,12 @@ Sub CopyDataRowsToStaging(ws As Worksheet, startRow As Long, maxRows As Long)
             wsDest.Cells(NextRow, 25).Value2 = ws.Cells(i, 27).Value2 ' DVEGA_DVOL (from col AA)
             wsDest.Cells(NextRow, 26).Value2 = ws.Cells(i, 28).Value2 ' DVEGA_DVOLDVOL (from col AB)
         Else
-            ' No more data in this section
-            Exit For
+            ' Check if row is truly empty (no date) vs just having error in premium
+            If IsEmpty(ws.Cells(i, 1).Value) Then
+                ' No more data in this section
+                Exit For
+            End If
+            ' Otherwise continue - row might have error value but next row could be valid
         End If
     Next i
 End Sub
@@ -1129,7 +1051,11 @@ Sub ValidateAndUpdateRICListWithSpacing(wsCollection As Worksheet, formulaCount 
     Const ROW_SPACING As Long = 300
     
     Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
-    
+
+    ' Force recalculation to ensure all values are populated
+    wsCollection.Calculate
+    Application.Wait Now + TimeValue("00:00:02")
+
     For i = 0 To formulaCount - 1
         formulaRow = 2 + (i * ROW_SPACING)
         
@@ -1149,18 +1075,23 @@ Sub ValidateAndUpdateRICListWithSpacing(wsCollection As Worksheet, formulaCount 
                 End If
                 
                 premium = wsCollection.Cells(checkRow, 2).Value
-                If Not IsEmpty(premium) And IsNumeric(premium) And premium > 0 Then
-                    dataFound = True
-                    lastPremium = premium
-                    
-                    ' Get IV if available
-                    iv = wsCollection.Cells(checkRow, 9).Value
-                    If IsNumeric(iv) Then
-                        lastIV = iv
+                ' Check for error first (VBA doesn't short-circuit And)
+                If Not IsEmpty(premium) And Not IsError(premium) Then
+                    If IsNumeric(premium) Then
+                        If premium > 0 Then
+                            dataFound = True
+                            lastPremium = premium
+
+                            ' Get IV if available
+                            iv = wsCollection.Cells(checkRow, 9).Value
+                            If Not IsError(iv) And IsNumeric(iv) Then
+                                lastIV = iv
+                            End If
+
+                            ' Get Delta if available
+                            delta = wsCollection.Cells(checkRow, 10).Value
+                        End If
                     End If
-                    
-                    ' Get Delta if available
-                    delta = wsCollection.Cells(checkRow, 10).Value
                 End If
             Next checkRow
             
@@ -1178,26 +1109,27 @@ Sub ValidateAndUpdateRICListWithSpacing(wsCollection As Worksheet, formulaCount 
                     wsRIC.Cells(ricRow, 13).Value = validationResult  ' Validation
                 End If
                 
-                If IsNumeric(delta) Then
+                If Not IsError(delta) And IsNumeric(delta) Then
                     wsRIC.Cells(ricRow, 12).Value = delta  ' Delta
                 End If
-                
-                ' Copy last row to staging if valid
-                If validationResult = "OK" Or validationResult = "High" Then
-                    ' Find the last row with data in this section
-                    Dim lastDataRow As Long
-                    lastDataRow = formulaRow
-                    Dim findRow As Long
-                    For findRow = formulaRow To formulaRow + ROW_SPACING - 1
-                        If Not IsEmpty(wsCollection.Cells(findRow, 2).Value) Then
-                            lastDataRow = findRow
-                        Else
-                            Exit For
-                        End If
-                    Next findRow
-                    ' Copy the rows with data to staging
-                    CopyDataRowsToStaging wsCollection, formulaRow, lastDataRow - formulaRow + 1
-                End If
+
+                ' Copy data to staging - export all data that was successfully downloaded
+                ' (validation is for quality info, not a gate for export)
+                ' Find the last row with data in this section
+                Dim lastDataRow As Long
+                lastDataRow = formulaRow
+                Dim findRow As Long
+                For findRow = formulaRow To formulaRow + ROW_SPACING - 1
+                    Dim cellVal As Variant
+                    cellVal = wsCollection.Cells(findRow, 2).Value
+                    If Not IsEmpty(cellVal) And Not IsError(cellVal) Then
+                        lastDataRow = findRow
+                    Else
+                        Exit For
+                    End If
+                Next findRow
+                ' Copy the rows with data to staging
+                CopyDataRowsToStaging wsCollection, formulaRow, lastDataRow - formulaRow + 1
             Else
                 ' Failed download
                 wsRIC.Cells(ricRow, 8).Value = "Error"
@@ -1362,30 +1294,38 @@ Sub ValidateAndUpdateRICList(wsCollection As Worksheet, startRow As Long, endRow
             premium = wsCollection.Cells(i, 2).Value
             iv = wsCollection.Cells(i, 9).Value
             delta = wsCollection.Cells(i, 10).Value
-            
-            ' Validate and update RIC_List
-            If Not IsEmpty(premium) And IsNumeric(premium) And premium > 0 Then
+
+            ' Validate and update RIC_List (check error first - VBA doesn't short-circuit And)
+            Dim premiumValid As Boolean
+            premiumValid = False
+            If Not IsEmpty(premium) And Not IsError(premium) Then
+                If IsNumeric(premium) Then
+                    If premium > 0 Then
+                        premiumValid = True
+                    End If
+                End If
+            End If
+
+            If premiumValid Then
                 ' Successful download
                 wsRIC.Cells(ricRow, 8).Value = "Yes"  ' Processed
                 wsRIC.Cells(ricRow, 9).Value = Now     ' Process_Time
                 wsRIC.Cells(ricRow, 10).Value = premium ' Premium
-                
-                If IsNumeric(iv) Then
+
+                If Not IsError(iv) And IsNumeric(iv) Then
                     wsRIC.Cells(ricRow, 11).Value = iv  ' IV
                     validationResult = ValidateIV(CDbl(iv), wsRIC.Cells(ricRow, 3).Value, _
                                                  GetSpotPrice(wsRIC.Cells(ricRow, 7).Value), wsRIC.Cells(ricRow, 2).Value)
                     wsRIC.Cells(ricRow, 13).Value = validationResult  ' Validation
                 End If
-                
-                If IsNumeric(delta) Then
+
+                If Not IsError(delta) And IsNumeric(delta) Then
                     wsRIC.Cells(ricRow, 12).Value = delta  ' Delta
                 End If
-                
-                ' Copy to staging if valid
-                If validationResult = "OK" Or validationResult = "High" Then
-                    ' Copy this single row to staging
-                    CopyDataRowsToStaging wsCollection, i, 1
-                End If
+
+                ' Copy to staging - export all data that was successfully downloaded
+                ' (validation is for quality info, not a gate for export)
+                CopyDataRowsToStaging wsCollection, i, 1
             Else
                 ' Failed download
                 wsRIC.Cells(ricRow, 8).Value = "Error"

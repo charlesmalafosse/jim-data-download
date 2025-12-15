@@ -1,4 +1,3 @@
-Attribute VB_Name = "VanillaOptions"
 Option Explicit     'Requires that all variables to be declared explicitly.
 Option Compare Text 'Uppercase letters to be equivalent to lowercase letters.
 Global Const Pi = 3.14159265358979
@@ -11,12 +10,20 @@ Option Base 1       'The "Option Base" statement allows to specify 0 or 1 as the
 
 
 Public Function GBlackScholesNGreeks(OutPutFlag As String, CallPutFlag As String, S As Double, x As Double, T As Double, _
-                r As Double, b As Double, v As Double, Optional dS)
-            
+                r As Double, b As Double, v As Double, Optional dS) As Variant
+
+    On Error GoTo ErrorHandler
+
+    ' Validate inputs
+    If T <= 0 Or S <= 0 Or x <= 0 Or v <= 0 Then
+        GBlackScholesNGreeks = CVErr(xlErrNA)
+        Exit Function
+    End If
+
     If IsMissing(dS) Then
         dS = 0.01
     End If
-    
+
     dS = 0.01
     If OutPutFlag = "p" Then ' Value
         GBlackScholesNGreeks = GBlackScholes(CallPutFlag, S, x, T, r, b, v)
@@ -65,14 +72,26 @@ Public Function GBlackScholesNGreeks(OutPutFlag As String, CallPutFlag As String
      ElseIf OutPutFlag = "dxdx" Then 'Gamma
         GBlackScholesNGreeks = (GBlackScholes(CallPutFlag, S, x + dS, T, r, b, v) - 2 * GBlackScholes(CallPutFlag, S, x, T, r, b, v) + GBlackScholes(CallPutFlag, S, x - dS, T, r, b, v)) / dS ^ 2
     End If
+    Exit Function
+
+ErrorHandler:
+    GBlackScholesNGreeks = CVErr(xlErrNA)
 End Function
 
 '// Black (1976) Options on futures/forwards
 Public Function Black76(CallPutFlag As String, F As Double, x _
-                As Double, T As Double, r As Double, v As Double) As Double
-                
+                As Double, T As Double, r As Double, v As Double) As Variant
+
+    On Error GoTo ErrorHandler
+
     Dim d1 As Double, d2 As Double
-    
+
+    ' Validate inputs to avoid divide by zero
+    If T <= 0 Or F <= 0 Or x <= 0 Or v <= 0 Then
+        Black76 = CVErr(xlErrNA)
+        Exit Function
+    End If
+
     d1 = (Log(F / x) + (v ^ 2 / 2) * T) / (v * Sqr(T))
     d2 = d1 - v * Sqr(T)
     If CallPutFlag = "c" Then
@@ -80,16 +99,27 @@ Public Function Black76(CallPutFlag As String, F As Double, x _
     ElseIf CallPutFlag = "p" Then
         Black76 = Exp(-r * T) * (x * CND(-d2) - F * CND(-d1))
     End If
-    
+    Exit Function
+
+ErrorHandler:
+    Black76 = CVErr(xlErrNA)
 End Function
 
 
 '// Garman and Kohlhagen (1983) Currency options
 Public Function GarmanKolhagen(CallPutFlag As String, S As Double, x _
-                As Double, T As Double, r As Double, rf As Double, v As Double) As Double
-                
+                As Double, T As Double, r As Double, rf As Double, v As Double) As Variant
+
+    On Error GoTo ErrorHandler
+
     Dim d1 As Double, d2 As Double
-    
+
+    ' Validate inputs to avoid divide by zero
+    If T <= 0 Or S <= 0 Or x <= 0 Or v <= 0 Then
+        GarmanKolhagen = CVErr(xlErrNA)
+        Exit Function
+    End If
+
     d1 = (Log(S / x) + (r - rf + v ^ 2 / 2) * T) / (v * Sqr(T))
     d2 = d1 - v * Sqr(T)
     If CallPutFlag = "c" Then
@@ -97,15 +127,27 @@ Public Function GarmanKolhagen(CallPutFlag As String, S As Double, x _
     ElseIf CallPutFlag = "p" Then
         GarmanKolhagen = x * Exp(-r * T) * CND(-d2) - S * Exp(-rf * T) * CND(-d1)
     End If
-    
+    Exit Function
+
+ErrorHandler:
+    GarmanKolhagen = CVErr(xlErrNA)
 End Function
 
 
 '//  The generalized Black and Scholes formula
 Public Function GBlackScholes(CallPutFlag As String, S As Double, x _
-                As Double, T As Double, r As Double, b As Double, v As Double) As Double
+                As Double, T As Double, r As Double, b As Double, v As Double) As Variant
 
     Dim d1 As Double, d2 As Double
+
+    On Error GoTo ErrorHandler
+
+    ' Validate inputs to avoid divide by zero
+    If T <= 0 Or S <= 0 Or x <= 0 Or v <= 0 Then
+        GBlackScholes = CVErr(xlErrNA)
+        Exit Function
+    End If
+
     d1 = (Log(S / x) + (b + v ^ 2 / 2) * T) / (v * Sqr(T))
     d2 = d1 - v * Sqr(T)
 
@@ -114,19 +156,30 @@ Public Function GBlackScholes(CallPutFlag As String, S As Double, x _
     ElseIf CallPutFlag = "p" Then
         GBlackScholes = x * Exp(-r * T) * CND(-d2) - S * Exp((b - r) * T) * CND(-d1)
     End If
-    
+    Exit Function
+
+ErrorHandler:
+    GBlackScholes = CVErr(xlErrNA)
 End Function
 
 
 '// This is the generlaized Black-Scholes-Merton formula including all greeeks
 '// This function is simply calling all the other functions
 Public Function CGBlackScholes(OutPutFlag As String, Optional CallPutFlag As String, Optional S As Double, Optional x _
-                As Double, Optional T As Double, Optional r As Double, Optional b As Double, Optional v As Double, Optional delta As Double, Optional InTheMoneyProb As Double, Optional ThetaDays As Double) As Double
-                
+                As Double, Optional T As Double, Optional r As Double, Optional b As Double, Optional v As Double, Optional delta As Double, Optional InTheMoneyProb As Double, Optional ThetaDays As Double) As Variant
+
+                    On Error GoTo ErrorHandler
+
                     Dim output As Double
-                  
+
                     output = 0
-                    
+
+                    ' Validate inputs to avoid divide by zero
+                    If T <= 0 Or S <= 0 Or x <= 0 Or v <= 0 Then
+                        CGBlackScholes = CVErr(xlErrNA)
+                        Exit Function
+                    End If
+
                 If OutPutFlag = "p" Then 'Value
                     CGBlackScholes = GBlackScholes(CallPutFlag, S, x, T, r, b, v)
                     
@@ -265,6 +318,10 @@ Public Function CGBlackScholes(OutPutFlag As String, Optional CallPutFlag As Str
                 ElseIf OutPutFlag = "CNDd2" Then 'N(d2)
                     CGBlackScholes = CND((Log(S / x) + (b - v ^ 2 / 2) * T) / (v * Sqr(T)))
                 End If
+                Exit Function
+
+ErrorHandler:
+                CGBlackScholes = CVErr(xlErrNA)
 End Function
 
 '// DDeltaDvol also known as vanna
