@@ -388,4 +388,40 @@ Examples:
 
 
 if __name__ == "__main__":
+    # Example usage with field overrides:
+    #
+    # 1. Override via command line:
+    #    python aggregate_files.py --override "ccy_pair=EUR/USD" --override "Lot_size=100"
+    #
+    # 2. Override via JSON file (create overrides.json):
+    #    {
+    #        "ccy_pair": "EUR/USD",
+    #        "Lot_size": "100",
+    #        "Reference": "LSEG_MONTHLY"
+    #    }
+    #    python aggregate_files.py --override-file overrides.json
+    #
+    # 3. Combine both methods:
+    #    python aggregate_files.py --override-file overrides.json --override "Name=SP500_Options"
+    #
+    # 4. Full example with filtering and output:
+    #    python aggregate_files.py \
+    #        --input-dir .. \
+    #        --pattern "1EW_*.csv" \
+    #        --override "ccy_pair=EUR/USD" \
+    #        --override "Lot_size=100" \
+    #        --filter "Premium>0" \
+    #        --output combined_options.csv
+    #
+    sys.argv = [
+        "aggregate_files.py",
+        "--input-dir", "..",
+        "--pattern", "*_batch*.csv",
+        "--override", "ccy_pair=EUR/USD",
+        "--override", "Lot_size=100",
+        # "--filter", "Premium>0",
+        # "--output", "debug_output.csv",
+        "--dry-run",  # Remove this to actually write the file
+    ]
+
     main()
