@@ -745,16 +745,19 @@ Function CreateChainDownloadSheet() As Worksheet
 
     sheetName = "ChainDownload"
 
-    ' Delete existing sheet if it exists
+    ' Check if sheet already exists
     On Error Resume Next
-    Application.DisplayAlerts = False
-    ThisWorkbook.Sheets(sheetName).Delete
-    Application.DisplayAlerts = True
+    Set ws = ThisWorkbook.Sheets(sheetName)
     On Error GoTo 0
 
-    ' Create new sheet
-    Set ws = ThisWorkbook.Sheets.Add
-    ws.Name = sheetName
+    If ws Is Nothing Then
+        ' Create new sheet if it doesn't exist
+        Set ws = ThisWorkbook.Sheets.Add
+        ws.Name = sheetName
+    Else
+        ' Clear existing sheet contents
+        ws.Cells.Clear
+    End If
 
     Set CreateChainDownloadSheet = ws
 End Function

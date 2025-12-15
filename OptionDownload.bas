@@ -41,6 +41,12 @@ Public g_StopRequested As Boolean
 Public g_NextScheduledProc As String
 Public g_RefreshCheckCount As Long
 
+' Future Refresh OnTime State
+Public g_FutureSheet As Worksheet
+Public g_FutureRefreshStartTime As Double
+Public g_FutureRefreshTimeout As Long
+Public g_FutureUnderlyingCount As Long
+
 ' Sheet Names
 Public Const SHEET_CONFIG As String = "Config"
 Public Const SHEET_RIC_LIST As String = "RIC_List"  ' Now used for progress tracking
@@ -84,19 +90,69 @@ Type OptionData
 End Type
 
 ' ============================================
-' Keep existing refresh and calculation functions
+' Future Sheet Refresh with OnTime (non-blocking)
 ' ============================================
 
 Sub RefreshFutureSheet()
-    Dim wsFuture As Worksheet
-    Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
+    ' Entry point - starts the async refresh
+    Set g_FutureSheet = ThisWorkbook.Worksheets(SHEET_FUTURE)
+    g_FutureRefreshStartTime = Timer
+    g_FutureRefreshTimeout = 60
 
-    RefreshLSEGWithTimeout wsFuture, 60
+    Application.StatusBar = "Starting LSEG refresh for " & SHEET_FUTURE & "..."
 
-    MsgBox "Double check data in : " & SHEET_FUTURE, vbExclamation
+    ' Start the LSEG refresh
+    On Error Resume Next
+    Application.Run "WorkspaceRefreshWorksheet", True, g_FutureRefreshTimeout * 1000, g_FutureSheet.Name
+    On Error GoTo 0
+
+    ' Schedule first check after 3 seconds
+    Application.OnTime Now + TimeValue("00:00:03"), "RefreshFutureSheet_CheckReady"
+End Sub
+
+Sub RefreshFutureSheet_CheckReady()
+    Dim readyCount As Long
+    Dim totalCount As Long
+    Dim elapsed As Double
+
+    elapsed = Timer - g_FutureRefreshStartTime
+
+    ' Calculate before check
+    g_FutureSheet.Calculate
+    DoEvents
+
+    ' Check if data is ready
+    If IsLSEGDataReady(g_FutureSheet, readyCount, totalCount, 10) Then
+        ' Data is ready - complete
+        Application.OnTime Now + TimeValue("00:00:02"), "RefreshFutureSheet_Complete"
+        Exit Sub
+    End If
+
+    ' Check timeout
+    If elapsed > g_FutureRefreshTimeout Then
+        Application.StatusBar = "Refresh timeout for " & SHEET_FUTURE & " - completing anyway..."
+        Application.OnTime Now + TimeValue("00:00:02"), "RefreshFutureSheet_Complete"
+        Exit Sub
+    End If
+
+    ' Update status and schedule next check
+    Application.StatusBar = "Refreshing " & SHEET_FUTURE & "... " & Format(elapsed, "0") & "s - " & _
+                           readyCount & " of " & totalCount & " cells ready"
+
+    Application.OnTime Now + TimeValue("00:00:02"), "RefreshFutureSheet_CheckReady"
+End Sub
+
+Sub RefreshFutureSheet_Complete()
+    g_FutureSheet.Calculate
+    DoEvents
 
     Application.StatusBar = False
+    MsgBox "Double check data in : " & SHEET_FUTURE, vbExclamation
 End Sub
+
+' ============================================
+' Refresh Future Underlyings with OnTime (non-blocking)
+' ============================================
 
 Sub RefreshFutureUnderlyings()
     Dim wsRIC As Worksheet
@@ -264,20 +320,78 @@ Sub RefreshFutureUnderlyings()
         currentCol = currentCol + 3
     Next i
 
-    ' Step 6: Refresh LSEG workspace
-    Application.StatusBar = "Refreshing LSEG data for " & arraySize & " underlyings..."
-    RefreshLSEGWithTimeout wsFuture, 120
+    ' Store state for async completion
+    Set g_FutureSheet = wsFuture
+    g_FutureRefreshStartTime = Timer
+    g_FutureRefreshTimeout = 120
+    g_FutureUnderlyingCount = arraySize
 
-    MsgBox "Added " & arraySize & " underlyings to SHEET_FUTURE in alphabetical order." & vbNewLine & _
-           "Data refresh complete. Please verify the downloaded data." & vbNewLine & _
-           "IMPORTANT: Add Bloomberg equivalent for underlying RICs in RicBloomberg range.", vbInformation
+    ' Step 6: Start LSEG refresh (non-blocking with OnTime)
+    Application.StatusBar = "Starting LSEG refresh for " & arraySize & " underlyings..."
 
-    Application.StatusBar = False
+    On Error Resume Next
+    Application.Run "WorkspaceRefreshWorksheet", True, g_FutureRefreshTimeout * 1000, g_FutureSheet.Name
+    On Error GoTo 0
+
+    ' Schedule first check after 3 seconds (release VBA control to let LSEG work)
+    Application.OnTime Now + TimeValue("00:00:03"), "RefreshFutureUnderlyings_CheckReady"
     Exit Sub
 
 ErrorHandler:
     Application.StatusBar = False
     MsgBox "Error in RefreshFutureUnderlyings: " & Err.Description, vbExclamation
+End Sub
+
+Sub RefreshFutureUnderlyings_CheckReady()
+    Dim readyCount As Long
+    Dim totalCount As Long
+    Dim elapsed As Double
+
+    On Error GoTo ErrorHandler
+
+    elapsed = Timer - g_FutureRefreshStartTime
+
+    ' Calculate before check
+    g_FutureSheet.Calculate
+    DoEvents
+
+    ' Check if data is ready
+    If IsLSEGDataReady(g_FutureSheet, readyCount, totalCount, 10) Then
+        ' Data is ready - schedule completion with delay
+        Application.OnTime Now + TimeValue("00:00:02"), "RefreshFutureUnderlyings_Complete"
+        Exit Sub
+    End If
+
+    ' Check timeout
+    If elapsed > g_FutureRefreshTimeout Then
+        Application.StatusBar = "Refresh timeout - completing anyway..."
+        Application.OnTime Now + TimeValue("00:00:02"), "RefreshFutureUnderlyings_Complete"
+        Exit Sub
+    End If
+
+    ' Update status and schedule next check
+    Application.StatusBar = "Refreshing " & g_FutureUnderlyingCount & " underlyings... " & _
+                           Format(elapsed, "0") & "s - " & readyCount & " of " & totalCount & " cells ready"
+
+    Application.OnTime Now + TimeValue("00:00:02"), "RefreshFutureUnderlyings_CheckReady"
+    Exit Sub
+
+ErrorHandler:
+    Application.StatusBar = "Error during refresh check: " & Err.Description
+    Application.OnTime Now + TimeValue("00:00:02"), "RefreshFutureUnderlyings_Complete"
+End Sub
+
+Sub RefreshFutureUnderlyings_Complete()
+    On Error Resume Next
+
+    g_FutureSheet.Calculate
+    DoEvents
+
+    Application.StatusBar = False
+
+    MsgBox "Added " & g_FutureUnderlyingCount & " underlyings to " & SHEET_FUTURE & " in alphabetical order." & vbNewLine & _
+           "Data refresh complete. Please verify the downloaded data." & vbNewLine & _
+           "IMPORTANT: Add Bloomberg equivalent for underlying RICs in RicBloomberg range.", vbInformation
 End Sub
 
 
