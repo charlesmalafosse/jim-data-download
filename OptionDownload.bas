@@ -697,6 +697,10 @@ Sub ProcessBatch_ProcessResults()
     Application.StatusBar = "Batch #" & g_BatchCounter & ": Validating and copying data to staging..."
     ValidateAndUpdateRICListWithSpacing wsCollection, g_FormulaCount
 
+    ' Retry failed RICs with alternate format (toggle expired suffix)
+    Application.StatusBar = "Batch #" & g_BatchCounter & ": Retrying failed RICs..."
+    RetryFailedRICsInBatch wsCollection, g_BatchStartRow, g_BatchEndRow
+
     'Application.StatusBar = "Batch #" & g_BatchCounter & ": Final calculations..."
     'Application.Calculate
 
@@ -1589,6 +1593,245 @@ Function ValidateIV(impliedVol As Double, strike As Double, _
     End If
 End Function
 
+' ============================================
+' RIC Retry Functions - Handle expired RIC suffix toggling
+' ============================================
+
+Function HasExpiredRICSuffix(ric As String) As Boolean
+    ' Check if RIC has ^XX## suffix pattern (e.g., ^T25, ^L26)
+    ' Pattern: caret, letter A-X, 2 digits
+    Dim suffixStart As Long
+    suffixStart = InStr(ric, "^")
+
+    If suffixStart > 0 Then
+        Dim suffix As String
+        suffix = Mid(ric, suffixStart + 1)
+        ' Should be 3 chars: letter + 2 digits
+        If Len(suffix) = 3 Then
+            If suffix Like "[A-X][0-9][0-9]" Then
+                HasExpiredRICSuffix = True
+                Exit Function
+            End If
+        End If
+    End If
+    HasExpiredRICSuffix = False
+End Function
+
+Function RemoveExpiredRICSuffix(ric As String) As String
+    ' Remove ^XX## suffix if present
+    Dim suffixStart As Long
+    suffixStart = InStr(ric, "^")
+
+    If suffixStart > 0 And HasExpiredRICSuffix(ric) Then
+        RemoveExpiredRICSuffix = Left(ric, suffixStart - 1)
+    Else
+        RemoveExpiredRICSuffix = ric
+    End If
+End Function
+
+Function AddExpiredRICSuffix(ric As String, monthCodeCall As String, yearCode As String) As String
+    ' Add ^{monthCodeCall}{yearCode} suffix to RIC
+    ' monthCodeCall should be the CALL month code (A-L)
+    If HasExpiredRICSuffix(ric) Then
+        ' Already has suffix, return as-is
+        AddExpiredRICSuffix = ric
+    Else
+        AddExpiredRICSuffix = ric & "^" & monthCodeCall & yearCode
+    End If
+End Function
+
+Function GetAlternateRIC(ric As String, monthCodeCall As String, yearCode As String) As String
+    ' Toggle the expired RIC suffix
+    ' If RIC has suffix, remove it; if not, add it
+    If HasExpiredRICSuffix(ric) Then
+        GetAlternateRIC = RemoveExpiredRICSuffix(ric)
+    Else
+        GetAlternateRIC = AddExpiredRICSuffix(ric, monthCodeCall, yearCode)
+    End If
+End Function
+
+Function GetMonthCodeCallFromRIC(ric As String, maturityMonth As Long) As String
+    ' Get the CALL month code for adding expired suffix
+    ' Call month codes: A=Jan, B=Feb, ... L=Dec
+    Dim monthCodes As String
+    monthCodes = "ABCDEFGHIJKL"
+    GetMonthCodeCallFromRIC = Mid(monthCodes, maturityMonth, 1)
+End Function
+
+Sub RetryFailedRICsInBatch(wsCollection As Worksheet, batchStartRow As Long, batchEndRow As Long)
+    ' Retry failed RICs by toggling the expired suffix
+    ' Called after initial validation to give failed RICs a second chance
+    Dim wsRIC As Worksheet
+    Dim i As Long
+    Dim failedCount As Long
+    Dim retryCount As Long
+    Dim successCount As Long
+    Dim ric As String
+    Dim alternateRIC As String
+    Dim maturityDate As Date
+    Dim maturityMonth As Long
+    Dim yearCode As String
+    Dim monthCodeCall As String
+    Dim formulaRow As Long
+    Const ROW_SPACING As Long = 300
+
+    Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
+
+    ' Count failed RICs in batch
+    failedCount = 0
+    For i = batchStartRow To batchEndRow
+        If wsRIC.Cells(i, 9).Value = "Error" Then
+            failedCount = failedCount + 1
+        End If
+    Next i
+
+    If failedCount = 0 Then
+        Exit Sub  ' No failures to retry
+    End If
+
+    Application.StatusBar = "Retrying " & failedCount & " failed RICs with alternate format..."
+
+    ' Update formulas for failed RICs with alternate RIC
+    retryCount = 0
+    For i = batchStartRow To batchEndRow
+        If wsRIC.Cells(i, 9).Value = "Error" Then
+            ric = wsRIC.Cells(i, 1).Value
+            maturityDate = wsRIC.Cells(i, 2).Value
+            maturityMonth = Month(maturityDate)
+            yearCode = wsRIC.Cells(i, 6).Value
+            monthCodeCall = GetMonthCodeCallFromRIC(ric, maturityMonth)
+
+            alternateRIC = GetAlternateRIC(ric, monthCodeCall, yearCode)
+
+            ' Find the corresponding formula row in DataCollection
+            ' Formula rows are spaced by ROW_SPACING, starting at row 2
+            formulaRow = 2 + (retryCount * ROW_SPACING)
+
+            ' Find actual formula row by scanning for this RIC's row reference
+            Dim j As Long
+            For j = 0 To g_FormulaCount - 1
+                formulaRow = 2 + (j * ROW_SPACING)
+                If wsCollection.Cells(formulaRow, 15).Value = i Then
+                    ' Found the formula row for this RIC
+                    ' Update the RHistory formula with alternate RIC
+                    wsCollection.Cells(formulaRow, 1).Formula = BuildRHistoryFormula(alternateRIC, g_DateStart, g_DateEnd)
+                    wsCollection.Cells(formulaRow, 16).Value = alternateRIC  ' Store alternate RIC
+
+                    ' Mark as retry in progress
+                    wsRIC.Cells(i, 15).Value = "Retry: " & alternateRIC  ' Error_Message column
+                    Exit For
+                End If
+            Next j
+
+            retryCount = retryCount + 1
+        End If
+    Next i
+
+    If retryCount = 0 Then
+        Exit Sub
+    End If
+
+    ' Refresh LSEG data for updated formulas
+    Application.StatusBar = "Refreshing LSEG data for " & retryCount & " retry RICs..."
+    RefreshLSEGWithTimeout wsCollection, 30
+
+    ' Wait for data to load
+    Application.Wait Now + TimeValue("00:00:03")
+    wsCollection.Calculate
+    Application.Wait Now + TimeValue("00:00:02")
+
+    ' Re-validate retried RICs
+    Application.StatusBar = "Validating retry results..."
+    successCount = 0
+
+    For i = batchStartRow To batchEndRow
+        If Left(wsRIC.Cells(i, 15).Value, 6) = "Retry:" Then
+            alternateRIC = Trim(Mid(wsRIC.Cells(i, 15).Value, 8))
+
+            ' Find formula row for this RIC
+            For j = 0 To g_FormulaCount - 1
+                formulaRow = 2 + (j * ROW_SPACING)
+                If wsCollection.Cells(formulaRow, 15).Value = i Then
+                    ' Check if data returned
+                    Dim premium As Variant
+                    Dim dataFound As Boolean
+                    Dim lastPremium As Double
+                    Dim lastIV As Double
+                    Dim iv As Variant
+                    Dim delta As Variant
+                    Dim checkRow As Long
+
+                    dataFound = False
+                    lastPremium = 0
+                    lastIV = 0
+
+                    For checkRow = formulaRow To formulaRow + ROW_SPACING - 1
+                        If IsEmpty(wsCollection.Cells(checkRow, 1).Value) Then
+                            Exit For
+                        End If
+
+                        premium = wsCollection.Cells(checkRow, 2).Value
+                        If Not IsEmpty(premium) And Not IsError(premium) Then
+                            If IsNumeric(premium) Then
+                                If premium > 0 Then
+                                    dataFound = True
+                                    lastPremium = premium
+                                    iv = wsCollection.Cells(checkRow, 9).Value
+                                    If Not IsError(iv) And IsNumeric(iv) Then
+                                        lastIV = iv
+                                    End If
+                                    delta = wsCollection.Cells(checkRow, 10).Value
+                                End If
+                            End If
+                        End If
+                    Next checkRow
+
+                    If dataFound Then
+                        ' Retry successful! Update RIC_List with alternate RIC
+                        successCount = successCount + 1
+                        wsRIC.Cells(i, 1).Value = alternateRIC  ' Update RIC (column A)
+                        wsRIC.Cells(i, 9).Value = "Yes"  ' Processed (column I)
+                        wsRIC.Cells(i, 10).Value = Now  ' Process_Time (column J)
+                        wsRIC.Cells(i, 11).Value = lastPremium  ' Premium (column K)
+                        wsRIC.Cells(i, 15).Value = "Retry succeeded"  ' Error_Message (column O)
+
+                        If lastIV > 0 Then
+                            wsRIC.Cells(i, 12).Value = lastIV  ' IV (column L)
+                            wsRIC.Cells(i, 14).Value = ValidateIV(lastIV, wsRIC.Cells(i, 3).Value, _
+                                                     GetSpotPrice(wsRIC.Cells(i, 7).Value), wsRIC.Cells(i, 2).Value)
+                        End If
+
+                        If Not IsError(delta) And IsNumeric(delta) Then
+                            wsRIC.Cells(i, 13).Value = delta  ' Delta (column M)
+                        End If
+
+                        ' Copy retry data to staging
+                        Dim lastDataRow As Long
+                        lastDataRow = formulaRow
+                        Dim findRow As Long
+                        For findRow = formulaRow To formulaRow + ROW_SPACING - 1
+                            Dim cellVal As Variant
+                            cellVal = wsCollection.Cells(findRow, 2).Value
+                            If Not IsEmpty(cellVal) And Not IsError(cellVal) Then
+                                lastDataRow = findRow
+                            Else
+                                Exit For
+                            End If
+                        Next findRow
+                        CopyDataRowsToStaging wsCollection, formulaRow, lastDataRow - formulaRow + 1
+                    Else
+                        ' Retry also failed
+                        wsRIC.Cells(i, 15).Value = "Retry failed: " & alternateRIC
+                    End If
+
+                    Exit For
+                End If
+            Next j
+        End If
+    Next i
+
+    Application.StatusBar = "Retry complete: " & successCount & " of " & retryCount & " succeeded"
+End Sub
 
 ' ============================================
 ' Keep remaining helper functions
