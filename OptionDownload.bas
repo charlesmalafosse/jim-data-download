@@ -7,7 +7,6 @@ Option Explicit
 ' Configuration Variables
 Public g_NamePrefix As String
 Public g_RootRIC As String
-Public g_SpotPrice As Double
 Public g_StrikeStep As Integer
 Public g_LotSize As Long
 Public g_Currency As String
@@ -565,7 +564,7 @@ Sub ProcessBatch_SetupFormulas()
         ric = wsRIC.Cells(i, 1).Value
 
         ' Skip if already processed
-        If wsRIC.Cells(i, 8).Value = "Yes" Then GoTo NextRIC
+        If wsRIC.Cells(i, 9).Value = "Yes" Then GoTo NextRIC  ' Column I: Processed
 
         ' Update status
         If g_FormulaCount Mod 10 = 0 Then
@@ -1212,19 +1211,19 @@ Sub ValidateAndUpdateRICListWithSpacing(wsCollection As Worksheet, formulaCount 
             ' Update RIC_List with results
             If dataFound Then
                 ' Successful download
-                wsRIC.Cells(ricRow, 8).Value = "Yes"  ' Processed
-                wsRIC.Cells(ricRow, 9).Value = Now     ' Process_Time
-                wsRIC.Cells(ricRow, 10).Value = lastPremium ' Premium
-                
+                wsRIC.Cells(ricRow, 9).Value = "Yes"  ' Processed (column I)
+                wsRIC.Cells(ricRow, 10).Value = Now     ' Process_Time (column J)
+                wsRIC.Cells(ricRow, 11).Value = lastPremium ' Premium (column K)
+
                 If lastIV > 0 Then
-                    wsRIC.Cells(ricRow, 11).Value = lastIV  ' IV
+                    wsRIC.Cells(ricRow, 12).Value = lastIV  ' IV (column L)
                     validationResult = ValidateIV(lastIV, wsRIC.Cells(ricRow, 3).Value, _
                                                  GetSpotPrice(wsRIC.Cells(ricRow, 7).Value), wsRIC.Cells(ricRow, 2).Value)
-                    wsRIC.Cells(ricRow, 13).Value = validationResult  ' Validation
+                    wsRIC.Cells(ricRow, 14).Value = validationResult  ' Validation (column N)
                 End If
-                
+
                 If Not IsError(delta) And IsNumeric(delta) Then
-                    wsRIC.Cells(ricRow, 12).Value = delta  ' Delta
+                    wsRIC.Cells(ricRow, 13).Value = delta  ' Delta (column M)
                 End If
 
                 ' Copy data to staging - export all data that was successfully downloaded
@@ -1246,8 +1245,8 @@ Sub ValidateAndUpdateRICListWithSpacing(wsCollection As Worksheet, formulaCount 
                 CopyDataRowsToStaging wsCollection, formulaRow, lastDataRow - formulaRow + 1
             Else
                 ' Failed download
-                wsRIC.Cells(ricRow, 8).Value = "Error"
-                wsRIC.Cells(ricRow, 14).Value = "No data returned"  ' Error_Message
+                wsRIC.Cells(ricRow, 9).Value = "Error"  ' Processed (column I)
+                wsRIC.Cells(ricRow, 15).Value = "No data returned"  ' Error_Message (column O)
             End If
         End If
     Next i
@@ -1280,28 +1279,29 @@ Sub SetupRICListSheet()
             .Range("E1").Value = "Month Code"
             .Range("F1").Value = "Year"
             .Range("G1").Value = "Underlying"
-            .Range("H1").Value = "Processed"
+            .Range("H1").Value = "Bloom_Ticker"
+            .Range("I1").Value = "Processed"
         End With
     End If
-    
+
     ' Add additional tracking columns if they don't exist
     With ws
-        If .Range("I1").Value = "" Then .Range("I1").Value = "Process_Time"
-        If .Range("J1").Value = "" Then .Range("J1").Value = "Premium"
-        If .Range("K1").Value = "" Then .Range("K1").Value = "IV"
-        If .Range("L1").Value = "" Then .Range("L1").Value = "Delta"
-        If .Range("M1").Value = "" Then .Range("M1").Value = "Validation"
-        If .Range("N1").Value = "" Then .Range("N1").Value = "Error_Message"
-        
+        If .Range("J1").Value = "" Then .Range("J1").Value = "Process_Time"
+        If .Range("K1").Value = "" Then .Range("K1").Value = "Premium"
+        If .Range("L1").Value = "" Then .Range("L1").Value = "IV"
+        If .Range("M1").Value = "" Then .Range("M1").Value = "Delta"
+        If .Range("N1").Value = "" Then .Range("N1").Value = "Validation"
+        If .Range("O1").Value = "" Then .Range("O1").Value = "Error_Message"
+
         ' Format headers
-        .Range("A1:N1").Font.Bold = True
-        .Range("A1:N1").Interior.Color = RGB(200, 200, 200)
-        
-        ' Add conditional formatting to Processed column
+        .Range("A1:O1").Font.Bold = True
+        .Range("A1:O1").Interior.Color = RGB(200, 200, 200)
+
+        ' Add conditional formatting to Processed column (I)
         Dim lastRow As Long
         lastRow = .Cells(.Rows.count, "A").End(xlUp).Row
         If lastRow > 1 Then
-            With .Range("H2:H" & lastRow).FormatConditions
+            With .Range("I2:I" & lastRow).FormatConditions
                 .Delete
                 ' Green for "Yes"
                 .Add Type:=xlTextString, String:="Yes", TextOperator:=xlContains
@@ -1315,9 +1315,9 @@ Sub SetupRICListSheet()
             End With
         End If
     End With
-    
+
     ' AutoFit columns
-    ws.Columns("A:N").AutoFit
+    ws.Columns("A:O").AutoFit
 End Sub
 
 Function CheckRICListExists() As Boolean
@@ -1346,7 +1346,7 @@ Function CountUnprocessedRICs() As Long
     
     count = 0
     For i = 2 To lastRow
-        If ws.Cells(i, 8).Value <> "Yes" Then  ' Column H: Processed
+        If ws.Cells(i, 9).Value <> "Yes" Then  ' Column I: Processed
             count = count + 1
         End If
     Next i
@@ -1363,7 +1363,7 @@ Function FindNextUnprocessedRIC(startFrom As Long) As Long
     lastRow = ws.Cells(ws.Rows.count, "A").End(xlUp).Row
     
     For i = startFrom To lastRow
-        If ws.Cells(i, 8).Value <> "Yes" Then  ' Column H: Processed
+        If ws.Cells(i, 9).Value <> "Yes" Then  ' Column I: Processed
             FindNextUnprocessedRIC = i
             Exit Function
         End If
@@ -1375,14 +1375,14 @@ End Function
 Sub MarkBatchStatus(startRow As Long, endRow As Long, Status As String)
     Dim ws As Worksheet
     Dim i As Long
-    
+
     Set ws = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
-    
+
     For i = startRow To endRow
-        If ws.Cells(i, 8).Value <> "Yes" Then  ' Don't overwrite successful downloads
-            ws.Cells(i, 8).Value = Status  ' Column H: Processed
+        If ws.Cells(i, 9).Value <> "Yes" Then  ' Don't overwrite successful downloads
+            ws.Cells(i, 9).Value = Status  ' Column I: Processed
             If Status = "Processing" Then
-                ws.Cells(i, 9).Value = Now  ' Column I: Process_Time
+                ws.Cells(i, 10).Value = Now  ' Column J: Process_Time
             End If
         End If
     Next i
@@ -1422,19 +1422,19 @@ Sub ValidateAndUpdateRICList(wsCollection As Worksheet, startRow As Long, endRow
 
             If premiumValid Then
                 ' Successful download
-                wsRIC.Cells(ricRow, 8).Value = "Yes"  ' Processed
-                wsRIC.Cells(ricRow, 9).Value = Now     ' Process_Time
-                wsRIC.Cells(ricRow, 10).Value = premium ' Premium
+                wsRIC.Cells(ricRow, 9).Value = "Yes"  ' Processed (column I)
+                wsRIC.Cells(ricRow, 10).Value = Now     ' Process_Time (column J)
+                wsRIC.Cells(ricRow, 11).Value = premium ' Premium (column K)
 
                 If Not IsError(iv) And IsNumeric(iv) Then
-                    wsRIC.Cells(ricRow, 11).Value = iv  ' IV
+                    wsRIC.Cells(ricRow, 12).Value = iv  ' IV (column L)
                     validationResult = ValidateIV(CDbl(iv), wsRIC.Cells(ricRow, 3).Value, _
                                                  GetSpotPrice(wsRIC.Cells(ricRow, 7).Value), wsRIC.Cells(ricRow, 2).Value)
-                    wsRIC.Cells(ricRow, 13).Value = validationResult  ' Validation
+                    wsRIC.Cells(ricRow, 14).Value = validationResult  ' Validation (column N)
                 End If
 
                 If Not IsError(delta) And IsNumeric(delta) Then
-                    wsRIC.Cells(ricRow, 12).Value = delta  ' Delta
+                    wsRIC.Cells(ricRow, 13).Value = delta  ' Delta (column M)
                 End If
 
                 ' Copy to staging - export all data that was successfully downloaded
@@ -1442,8 +1442,8 @@ Sub ValidateAndUpdateRICList(wsCollection As Worksheet, startRow As Long, endRow
                 CopyDataRowsToStaging wsCollection, i, 1
             Else
                 ' Failed download
-                wsRIC.Cells(ricRow, 8).Value = "Error"
-                wsRIC.Cells(ricRow, 14).Value = "No data returned"  ' Error_Message
+                wsRIC.Cells(ricRow, 9).Value = "Error"  ' Processed (column I)
+                wsRIC.Cells(ricRow, 15).Value = "No data returned"  ' Error_Message (column O)
             End If
         End If
     Next i
@@ -1461,9 +1461,9 @@ Sub ShowBatchSummaryFromRICList(startRow As Long, endRow As Long)
     errorCount = 0
     
     For i = startRow To endRow
-        If ws.Cells(i, 8).Value = "Yes" Then
+        If ws.Cells(i, 9).Value = "Yes" Then  ' Column I: Processed
             successCount = successCount + 1
-        ElseIf ws.Cells(i, 8).Value = "Error" Then
+        ElseIf ws.Cells(i, 9).Value = "Error" Then
             errorCount = errorCount + 1
         End If
     Next i
@@ -1613,11 +1613,11 @@ Sub GenerateQualityReport()
     lastRow = wsRIC.Cells(wsRIC.Rows.count, "A").End(xlUp).Row
     
     For i = 2 To lastRow
-        If wsRIC.Cells(i, 8).Value <> "No" And wsRIC.Cells(i, 8).Value <> "" Then
+        If wsRIC.Cells(i, 9).Value <> "No" And wsRIC.Cells(i, 9).Value <> "" Then  ' Column I: Processed
             totalProcessed = totalProcessed + 1
-            If wsRIC.Cells(i, 8).Value = "Yes" Then
+            If wsRIC.Cells(i, 9).Value = "Yes" Then
                 totalSuccess = totalSuccess + 1
-            ElseIf wsRIC.Cells(i, 8).Value = "Error" Then
+            ElseIf wsRIC.Cells(i, 9).Value = "Error" Then
                 totalErrors = totalErrors + 1
             End If
         End If
@@ -1700,8 +1700,8 @@ Function GetSpotPrice(underlyingTicker As String) As Double
     startRow = wsFuture.Range(RANGE_DOWNLOAD).Row
 
     If startCol = 0 Or startRow = 0 Then
-        ' Named range not found, fall back to global variable
-        GetSpotPrice = g_SpotPrice
+        ' Named range not found, return 0
+        GetSpotPrice = 0
         On Error GoTo 0
         Exit Function
     End If
@@ -1742,8 +1742,8 @@ Function GetSpotPrice(underlyingTicker As String) As Double
         End If
     Wend
 
-    ' If we reach here, underlying not found or no valid price - fall back to global variable
-    GetSpotPrice = g_SpotPrice
+    ' If we reach here, underlying not found or no valid price - return 0
+    GetSpotPrice = 0
 
     On Error GoTo 0
 End Function

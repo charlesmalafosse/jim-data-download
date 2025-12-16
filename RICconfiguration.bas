@@ -13,6 +13,9 @@ Public Const SHEET_CONFIG As String = "Config"
 Public Const SHEET_RIC_LIST As String = "RIC_List"
 Public Const MONTH_CALL = "monthCall"
 Public Const MONTH_PUT = "monthPut"
+Public Const WEEKLY_CALL = "weeklyCall"
+Public Const WEEKLY_PUT = "weeklyPut"
+Public Const OPTION_FREQUENCY = "optionFrequency"
 
 ' OnTime Chain State for DownloadFromChain
 Public g_ChainState As Long
@@ -55,13 +58,13 @@ Sub GenerateAllRICs()
         Set outputSheet = ThisWorkbook.Sheets.Add
         outputSheet.Name = SHEET_RIC_LIST
     Else
-        ' Clear existing content in columns A to N
+        ' Clear existing content in columns A to O
         lastRow = outputSheet.Cells(outputSheet.Rows.count, "A").End(xlUp).Row
         If lastRow > 0 Then
-            outputSheet.Range("A1:N" & lastRow).Clear
+            outputSheet.Range("A1:O" & lastRow).Clear
         End If
     End If
-    
+
     ' Add headers
     With outputSheet
         .Range("A1").Value = "RIC"
@@ -71,9 +74,10 @@ Sub GenerateAllRICs()
         .Range("E1").Value = "Month Code"
         .Range("F1").Value = "Year"
         .Range("G1").Value = "Underlying"
-        .Range("H1").Value = "Processed"  ' New column for tracking processing status
-        .Range("A1:H1").Font.Bold = True
-        .Range("A1:H1").Interior.Color = RGB(200, 200, 200)
+        .Range("H1").Value = "Bloom_Ticker"  ' Bloomberg ticker
+        .Range("I1").Value = "Processed"     ' Processing status (shifted from H)
+        .Range("A1:I1").Font.Bold = True
+        .Range("A1:I1").Interior.Color = RGB(200, 200, 200)
     End With
     
     ' Output all RICs
@@ -89,19 +93,21 @@ Sub GenerateAllRICs()
             .Cells(i, 5).Value = ricDict("MonthCode")
             .Cells(i, 6).Value = ricDict("YearCode")
             ' Column G (Underlying) left empty - no LSEG formula needed
-            ' Initialize Processed column as "No" or empty
-            .Cells(i, 8).Value = "No"
+            ' Column H: Bloomberg ticker
+            .Cells(i, 8).Value = BuildBloombergTicker(ricDict("OptionType"), ricDict("Strike"), ricDict("Maturity"))
+            ' Column I: Initialize Processed column as "No"
+            .Cells(i, 9).Value = "No"
         End With
         i = i + 1
     Next
 
     ' Format
-    outputSheet.Columns("A:H").AutoFit
+    outputSheet.Columns("A:I").AutoFit
     outputSheet.Range("B:B").NumberFormat = "mm/dd/yyyy"
     outputSheet.Range("C:C").NumberFormat = "#,##0"
 
-    ' Add conditional formatting to Processed column for visual feedback
-    With outputSheet.Range("H2:H" & ricList.count + 1).FormatConditions
+    ' Add conditional formatting to Processed column (I) for visual feedback
+    With outputSheet.Range("I2:I" & ricList.count + 1).FormatConditions
         .Delete
         ' Green for "Yes"
         .Add Type:=xlTextString, String:="Yes", TextOperator:=xlContains
@@ -116,7 +122,7 @@ Sub GenerateAllRICs()
 
     MsgBox "Generated " & ricList.count & " RICs!" & vbNewLine & _
            "Check '" & SHEET_RIC_LIST & "' sheet for details." & vbNewLine & _
-           "Column H tracks processing status.", vbInformation
+           "Column I tracks processing status.", vbInformation
 End Sub
 
 ' ============================================
@@ -167,25 +173,40 @@ Function CreateRICInfo(maturityDate As Date, strike As Double, optionType As Str
     Dim strikeStr As String
     Dim ricDict As Object
     Dim ricMonth As Integer
+    Dim optFrequency As String
 
     ' Create dictionary to hold RIC information
     Set ricDict = CreateObject("Scripting.Dictionary")
 
     ' Get values
     rootRIC = ThisWorkbook.Sheets(SHEET_CONFIG).Range("rootRIC").Value
+    optFrequency = GetOptionFrequency()
 
-    ' Use the FOLLOWING month for month code (e.g., November maturity -> December code)
-    ' Month 12 wraps to Month 1
-    ricMonth = Month(maturityDate) + 1
-    If ricMonth > 12 Then ricMonth = 1
+    ' Get type/month code based on frequency
+    If optFrequency = "weekly" Then
+        ' Weekly: use actual maturity month for month code
+        ricMonth = Month(maturityDate)
+        monthCode = GetMonthCodeFromTable(ricMonth, optionType)
+        monthCodeCallForExpiredRIC = GetMonthCodeFromTable(ricMonth, "CALL")
+    Else
+        ' Monthly: use following month for month code lookup
+        ricMonth = Month(maturityDate) + 1
+        If ricMonth > 12 Then ricMonth = 1
+        monthCode = GetMonthCodeFromTable(ricMonth, optionType)
+        monthCodeCallForExpiredRIC = GetMonthCodeFromTable(ricMonth, "CALL")
+    End If
 
-    monthCode = GetMonthCodeFromTable(ricMonth, optionType)
-    monthCodeCallForExpiredRIC = GetMonthCodeFromTable(ricMonth, "CALL")
     yearCode = Right(CStr(Year(maturityDate)), 2)
-    strikeStr = FormatStrikeForRIC(strike)
+
+    ' Use appropriate strike formatter based on frequency
+    If optFrequency = "weekly" Then
+        strikeStr = FormatStrikeForWeeklyRIC(strike)
+    Else
+        strikeStr = FormatStrikeForRIC(strike)
+    End If
 
     ' Populate dictionary
-    ricDict.Add "FullRIC", BuildRICString(rootRIC, strikeStr, monthCode, yearCode, maturityDate, monthCodeCallForExpiredRIC)
+    ricDict.Add "FullRIC", BuildRICString(rootRIC, strikeStr, monthCode, yearCode, maturityDate, monthCodeCallForExpiredRIC, optFrequency)
     ricDict.Add "Maturity", maturityDate
     ricDict.Add "Strike", strike
     ricDict.Add "OptionType", optionType
@@ -199,14 +220,22 @@ End Function
 ' BUILD RIC STRING
 ' ============================================
 
-Function BuildRICString(rootRIC As String, strikeStr As String, monthCode As String, yearCode As String, maturityDate As Date, monthCodeCallForExpiredRIC As String) As String
+Function BuildRICString(rootRIC As String, strikeStr As String, monthCode As String, yearCode As String, maturityDate As Date, monthCodeCallForExpiredRIC As String, optFrequency As String) As String
     ' Builds the complete RIC string
-    ' Format example: 1EW7000T25 for current/future options
-    '                 1EW7000T25^T25 for expired options
-    
-    ' Basic format
-    BuildRICString = rootRIC & strikeStr & monthCode & yearCode
-    
+    ' Monthly format: 1EW7000T25 (rootRIC, strike, monthCode for following month, year)
+    ' Weekly format:  1E3W1005L25 (rootRIC minus W, occurrence, W, strike, monthCode for maturity month, year)
+    Dim occurrence As String
+    Dim rootWithoutW As String
+
+    If optFrequency = "weekly" Then
+        occurrence = CStr(GetDayOccurrenceInMonth(maturityDate))
+        ' Weekly format: {root minus W}{occurrence}W{strike}{monthCode}{yearCode}
+        rootWithoutW = Left(rootRIC, Len(rootRIC) - 1)
+        BuildRICString = rootWithoutW & occurrence & "W" & strikeStr & monthCode & yearCode
+    Else
+        BuildRICString = rootRIC & strikeStr & monthCode & yearCode
+    End If
+
     ' Add ^{monthCode}{yearCode} suffix if maturity date is before today (expired option)
     If maturityDate < Date Then
         BuildRICString = BuildRICString & "^" & monthCodeCallForExpiredRIC & yearCode
@@ -234,6 +263,83 @@ Function FormatStrikeForRIC(strike As Double) As String
     strikeStr = Replace(strikeStr, ".", "")
 
     FormatStrikeForRIC = strikeStr
+End Function
+
+Function FormatStrikeForWeeklyRIC(strike As Double) As String
+    ' Weekly strike: remove decimal, no trailing zeros
+    ' 100.5 -> "1005", 6000 -> "6000", 100.00 -> "100"
+    Dim strikeStr As String
+
+    If strike = Int(strike) Then
+        ' Whole number - use as-is
+        strikeStr = CStr(CLng(strike))
+    Else
+        ' Has decimals - multiply by 10 and convert
+        strikeStr = CStr(CLng(strike * 10))
+    End If
+
+    FormatStrikeForWeeklyRIC = strikeStr
+End Function
+
+' ============================================
+' GET DAY OCCURRENCE IN MONTH (for weekly options)
+' ============================================
+
+Function GetDayOccurrenceInMonth(d As Date) As Integer
+    ' Returns which occurrence of the weekday this date is in its month
+    ' e.g., 2025-12-15 (Monday) -> 3 (3rd Monday of December)
+    Dim firstOfMonth As Date
+    Dim dayOfWeek As Integer
+    Dim firstOccurrence As Date
+    Dim occurrence As Integer
+
+    firstOfMonth = DateSerial(Year(d), Month(d), 1)
+    dayOfWeek = Weekday(d)  ' 1=Sunday, 2=Monday, etc.
+
+    ' Find first occurrence of this weekday in the month
+    firstOccurrence = firstOfMonth + ((dayOfWeek - Weekday(firstOfMonth) + 7) Mod 7)
+
+    ' Calculate which occurrence this date is
+    occurrence = ((Day(d) - Day(firstOccurrence)) \ 7) + 1
+
+    GetDayOccurrenceInMonth = occurrence
+End Function
+
+' ============================================
+' GET OPTION FREQUENCY FROM CONFIG
+' ============================================
+
+Function GetOptionFrequency() As String
+    ' Returns "monthly" or "weekly" from Config sheet
+    On Error Resume Next
+    GetOptionFrequency = LCase(Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range(OPTION_FREQUENCY).Value))
+    On Error GoTo 0
+
+    ' Default to monthly if not set or invalid
+    If GetOptionFrequency <> "weekly" Then
+        GetOptionFrequency = "monthly"
+    End If
+End Function
+
+' ============================================
+' BUILD BLOOMBERG TICKER FROM CONFIG
+' ============================================
+
+Function BuildBloombergTicker(optionType As String, strike As Double, maturityDate As Date) As String
+    ' Build Bloomberg ticker from rootBB + type + strike + maturity
+    ' Format: "ES1 Index C 6000 12/19/2025"
+    Dim rootBB As String
+
+    On Error Resume Next
+    rootBB = Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("rootBB").Value)
+    On Error GoTo 0
+
+    If rootBB = "" Then
+        BuildBloombergTicker = ""
+        Exit Function
+    End If
+
+    BuildBloombergTicker = rootBB & " " & Left(optionType, 1) & " " & strike & " " & Format(maturityDate, "mm/dd/yyyy")
 End Function
 
 ' ============================================
@@ -334,6 +440,30 @@ Function GetMonthCodeFromTable(monthNum As Integer, optionType As String) As Str
     ' If not found, raise error
     Err.Raise vbObjectError + 513, "GetMonthCodeFromTable", _
               "No month code found for month " & monthNum & " and option type " & optionType
+End Function
+
+Function GetWeeklyTypeCodeFromRange(optionType As String) As String
+    ' Get the type code for weekly options from named range
+    ' Weekly options have no month notion - just CALL or PUT code
+    Dim ws As Worksheet
+    Dim rng As Range
+
+    Set ws = ThisWorkbook.Sheets(SHEET_CONFIG)
+
+    On Error Resume Next
+    If optionType = "CALL" Then
+        Set rng = ws.Range(WEEKLY_CALL)
+    Else
+        Set rng = ws.Range(WEEKLY_PUT)
+    End If
+    On Error GoTo 0
+
+    If rng Is Nothing Then
+        Err.Raise vbObjectError + 514, "GetWeeklyTypeCodeFromRange", _
+                  "Named range not found for weekly " & optionType
+    End If
+
+    GetWeeklyTypeCodeFromRange = rng.Cells(1, 1).Value
 End Function
 
 ' ============================================
@@ -991,7 +1121,11 @@ Sub ProcessSingleColumnOptions(chainSheet As Worksheet, ricListSheet As Workshee
             .Cells(ricListRow, 5).Value = "n/a" ' Month Code
             .Cells(ricListRow, 6).Value = "n/a"  ' Year
             .Cells(ricListRow, 7).Value = chainSheet.Cells(i, optionColumn + 5).Value ' Underlying
-            .Cells(ricListRow, 8).Value = "No"  ' Processed
+            .Cells(ricListRow, 8).Value = BuildBloombergTicker( _
+                CStr(chainSheet.Cells(i, optionColumn + 4).Value), _
+                CDbl(chainSheet.Cells(i, optionColumn + 2).Value), _
+                CDate(chainSheet.Cells(i, optionColumn + 3).Value))  ' Bloom_Ticker
+            .Cells(ricListRow, 9).Value = "No"  ' Processed
         End With
         ricListRow = ricListRow + 1
         totalOptions = totalOptions + 1
@@ -1007,13 +1141,13 @@ End Sub
 
 Sub FormatRICListSheet(ricListSheet As Worksheet, ricListRow As Long)
     With ricListSheet
-        .Columns("A:H").AutoFit
+        .Columns("A:I").AutoFit
         .Range("B:B").NumberFormat = "mm/dd/yyyy"
         .Range("C:C").NumberFormat = "#,##0"
 
-        ' Add conditional formatting
+        ' Add conditional formatting to Processed column (I)
         If ricListRow > 2 Then
-            With .Range("H2:H" & ricListRow - 1).FormatConditions
+            With .Range("I2:I" & ricListRow - 1).FormatConditions
                 .Delete
                 .Add Type:=xlTextString, String:="Yes", TextOperator:=xlContains
                 .Item(.count).Interior.Color = RGB(200, 255, 200)
