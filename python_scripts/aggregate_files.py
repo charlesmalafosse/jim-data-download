@@ -54,6 +54,7 @@ CSV_COLUMNS = [
     "DGAMMA/DVOL",
     "DVEGA/DVOL",
     "DVEGA/DVOLDVOL",
+    "RIC",
 ]
 
 # Key columns for duplicate detection

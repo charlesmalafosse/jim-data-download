@@ -45,6 +45,8 @@ Public g_FutureSheet As Worksheet
 Public g_FutureRefreshStartTime As Double
 Public g_FutureRefreshTimeout As Long
 Public g_FutureUnderlyingCount As Long
+Public g_FutureFormulaStartCol As Long  ' First column where RHistory formula is placed
+Public g_FutureFormulaStartRow As Long  ' First row where RHistory data starts
 
 ' Sheet Names
 Public Const SHEET_CONFIG As String = "Config"
@@ -240,9 +242,9 @@ Sub RefreshFutureUnderlyings()
         ricDataStartRow = ricBloombergRange.Row + 1  ' Skip header (N19 + 1 = N20)
         ricDataEndRow = ricBloombergRange.Row + ricBloombergRange.Rows.count - 1  ' N31
 
-        ' Clear previous data in both columns (preserve header at row 1 of range)
+        ' Clear previous data in column 1 only (preserve header at row 1 of range)
         wsConfig.Range(wsConfig.Cells(ricDataStartRow, ricBloombergRange.Column), _
-                      wsConfig.Cells(ricDataEndRow, ricBloombergRange.Column + 1)).ClearContents
+                      wsConfig.Cells(ricDataEndRow, ricBloombergRange.Column)).ClearContents
 
         ' Add sorted RICs to column 1 (column N)
         ricRowNum = ricDataStartRow
@@ -324,6 +326,8 @@ Sub RefreshFutureUnderlyings()
     g_FutureRefreshStartTime = Timer
     g_FutureRefreshTimeout = 120
     g_FutureUnderlyingCount = arraySize
+    g_FutureFormulaStartCol = startCol - 1  ' First RHistory formula column
+    g_FutureFormulaStartRow = startRow + 2  ' First RHistory data row
 
     ' Step 6: Start LSEG refresh (non-blocking with OnTime)
     Application.StatusBar = "Starting LSEG refresh for " & arraySize & " underlyings..."
@@ -345,17 +349,44 @@ Sub RefreshFutureUnderlyings_CheckReady()
     Dim readyCount As Long
     Dim totalCount As Long
     Dim elapsed As Double
+    Dim i As Long
+    Dim checkCol As Long
+    Dim cellText As String
 
     On Error GoTo ErrorHandler
 
     elapsed = Timer - g_FutureRefreshStartTime
+    ' Handle midnight rollover
+    If elapsed < 0 Then elapsed = elapsed + 86400
 
     ' Calculate before check
     g_FutureSheet.Calculate
     DoEvents
 
-    ' Check if data is ready
-    If IsLSEGDataReady(g_FutureSheet, readyCount, totalCount, 10) Then
+    ' Check if data is ready by examining actual RHistory formula columns
+    ' RHistory formulas are at columns: g_FutureFormulaStartCol, +3, +6, etc.
+    ' Data (close price) is in column + 1 relative to formula column
+    readyCount = 0
+    totalCount = g_FutureUnderlyingCount
+
+    For i = 1 To g_FutureUnderlyingCount
+        ' Calculate the price column for this underlying (formula col + 1)
+        checkCol = g_FutureFormulaStartCol + ((i - 1) * 3) + 1
+
+        ' Check the first data row for this underlying
+        cellText = CStr(g_FutureSheet.Cells(g_FutureFormulaStartRow, checkCol).Text)
+
+        ' Check if cell is ready (not showing LSEG loading messages)
+        If InStr(1, cellText, "Retrieving", vbTextCompare) = 0 And _
+           InStr(1, cellText, "Requesting", vbTextCompare) = 0 And _
+           InStr(1, cellText, "Loading", vbTextCompare) = 0 And _
+           cellText <> "" Then
+            readyCount = readyCount + 1
+        End If
+    Next i
+
+    ' Check if all underlyings are ready
+    If readyCount = totalCount Then
         ' Data is ready - schedule completion with delay
         Application.OnTime Now + TimeValue("00:00:02"), "RefreshFutureUnderlyings_Complete"
         Exit Sub
@@ -370,7 +401,7 @@ Sub RefreshFutureUnderlyings_CheckReady()
 
     ' Update status and schedule next check
     Application.StatusBar = "Refreshing " & g_FutureUnderlyingCount & " underlyings... " & _
-                           Format(elapsed, "0") & "s - " & readyCount & " of " & totalCount & " cells ready"
+                           Format(elapsed, "0") & "s - " & readyCount & " of " & totalCount & " ready"
 
     Application.OnTime Now + TimeValue("00:00:02"), "RefreshFutureUnderlyings_CheckReady"
     Exit Sub
@@ -954,7 +985,7 @@ Sub SetupRHistoryAndMetadata(ws As Worksheet, startRow As Long, maxRows As Long,
     ' Setup basic metadata and VLOOKUP formulas (NO Greek formulas yet)
     For i = startRow To endRow
         ' Store metadata
-        ws.Cells(i, 3).Value = GetBloombergTicker(underlyingTicker) & " " & Left(optType, 1) & " " & strike
+        ws.Cells(i, 3).Value = GetBloombergTicker(underlyingTicker, ricRowRef) & " " & Left(optType, 1) & " " & strike
         ws.Cells(i, 4).Value = maturity
 
         ' Column E: Interest_rate - VLOOKUP from RFR range with dynamic last row
@@ -982,7 +1013,7 @@ Sub SetupRHistoryAndMetadata(ws As Worksheet, startRow As Long, maxRows As Long,
         ws.Cells(i, 16).Value = optionRic
         ws.Cells(i, 17).Value = g_LotSize
         ws.Cells(i, 18).Value = g_NamePrefix & " " & Left(optType, 1) & " " & strike & " " & Format(maturity, "mmm-yyyy")
-        ws.Cells(i, 19).Value = GetBloombergTicker(underlyingTicker)
+        ws.Cells(i, 19).Value = GetBloombergTicker(underlyingTicker, ricRowRef)
         ws.Cells(i, 20).Value = g_Currency
         ws.Cells(i, 21).Value = 0
     Next i
@@ -1141,6 +1172,7 @@ Sub CopyDataRowsToStaging(ws As Worksheet, startRow As Long, maxRows As Long)
             wsDest.Cells(NextRow, 24).Value2 = ws.Cells(i, 26).Value2 ' DGAMMA_DVOL (from col Z)
             wsDest.Cells(NextRow, 25).Value2 = ws.Cells(i, 27).Value2 ' DVEGA_DVOL (from col AA)
             wsDest.Cells(NextRow, 26).Value2 = ws.Cells(i, 28).Value2 ' DVEGA_DVOLDVOL (from col AB)
+            wsDest.Cells(NextRow, 27).Value2 = ws.Cells(i, 16).Value2 ' RIC (from col P - the RIC used for download)
         Else
             ' Check if row is truly empty (no date) vs just having error in premium
             If IsEmpty(ws.Cells(i, 1).Value) Then
@@ -1282,7 +1314,7 @@ Sub SetupRICListSheet()
             .Range("D1").Value = "Type"
             .Range("E1").Value = "Month Code"
             .Range("F1").Value = "Year"
-            .Range("G1").Value = "Underlying"
+            .Range("G1").Value = "Underlying LSEG"
             .Range("H1").Value = "Bloom_Ticker"
             .Range("I1").Value = "Processed"
         End With
@@ -1991,51 +2023,43 @@ Function GetSpotPrice(underlyingTicker As String) As Double
     On Error GoTo 0
 End Function
 
-Function GetBloombergTicker(underlyingRIC As String) As String
-    ' Lookup Bloomberg ticker from RicBloomberg table on Config sheet
-    ' Column 1 (N): LSEG underlying RIC (e.g., "ESZ4")
-    ' Column 2 (O): Bloomberg ticker (e.g., "ES1 Index")
+Function GetBloombergTicker(underlyingRIC As String, Optional ricRowRef As Long = 0) As String
+    ' Get Bloomberg ticker for an option
+    ' Priority: 1) Bloom_Ticker from RIC_List (if ricRowRef provided)
+    '           2) rootBB named range from Config sheet
+    '           3) underlyingRIC as fallback
     Dim wsConfig As Worksheet
-    Dim ricBloombergRange As Range
-    Dim searchRow As Long
-    Dim firstDataRow As Long
-    Dim lastDataRow As Long
-    Dim foundRIC As String
+    Dim wsRICList As Worksheet
+    Dim bloomTicker As String
+    Dim rootBB As String
 
-    On Error Resume Next
-    Set wsConfig = ThisWorkbook.Worksheets(SHEET_CONFIG)
-    Set ricBloombergRange = wsConfig.Range("RicBloomberg")
-    On Error GoTo 0
+    ' First, try to get Bloom_Ticker from RIC_List if row reference provided
+    If ricRowRef > 0 Then
+        On Error Resume Next
+        Set wsRICList = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
+        On Error GoTo 0
 
-    ' If range not found, return input as fallback
-    If ricBloombergRange Is Nothing Then
-        GetBloombergTicker = underlyingRIC
-        Exit Function
+        If Not wsRICList Is Nothing Then
+            bloomTicker = Trim(CStr(wsRICList.Cells(ricRowRef, 8).Value))  ' Column H = Bloom_Ticker
+            If bloomTicker <> "" Then
+                GetBloombergTicker = bloomTicker
+                Exit Function
+            End If
+        End If
     End If
 
-    ' Calculate data rows (skip header row 1)
-    firstDataRow = ricBloombergRange.Row + 1
-    lastDataRow = ricBloombergRange.Row + ricBloombergRange.Rows.count - 1
+    ' Fallback: use rootBB named range from Config sheet
+    On Error Resume Next
+    Set wsConfig = ThisWorkbook.Worksheets(SHEET_CONFIG)
+    rootBB = Trim(CStr(wsConfig.Range("rootBB").Value))
+    On Error GoTo 0
 
-    ' Search for matching RIC in column 1 of range
-    For searchRow = firstDataRow To lastDataRow
-        foundRIC = Trim(CStr(wsConfig.Cells(searchRow, ricBloombergRange.Column).Value))
-
-        If foundRIC = underlyingRIC Then
-            ' Found match - return Bloomberg ticker from column 2
-            GetBloombergTicker = Trim(CStr(wsConfig.Cells(searchRow, ricBloombergRange.Column + 1).Value))
-
-            ' If Bloomberg ticker is empty, return input as fallback
-            If GetBloombergTicker = "" Then
-                GetBloombergTicker = underlyingRIC
-            End If
-
-            Exit Function
-        End If
-    Next searchRow
-
-    ' Not found in table - return input RIC as fallback
-    GetBloombergTicker = underlyingRIC
+    If rootBB <> "" Then
+        GetBloombergTicker = rootBB
+    Else
+        ' Final fallback: return input RIC
+        GetBloombergTicker = underlyingRIC
+    End If
 End Function
 
 Function GetRiskFreeRate() As Double
@@ -2154,8 +2178,9 @@ Sub SetupStagingSheet()
     ws.Range("X1").Value = "DGAMMA/DVOL"
     ws.Range("Y1").Value = "DVEGA/DVOL"
     ws.Range("Z1").Value = "DVEGA/DVOLDVOL"
+    ws.Range("AA1").Value = "RIC"  ' RIC used for download
 
-    ws.Range("A1:Z1").Font.Bold = True
+    ws.Range("A1:AA1").Font.Bold = True
 
     ' Format date columns to YYYY-MM-DD hh:mm:ss for CSV export
     ws.Columns("A:A").NumberFormat = "yyyy-mm-dd hh:mm:ss"  ' Spot_Date

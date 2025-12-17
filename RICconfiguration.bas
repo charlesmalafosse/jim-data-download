@@ -73,7 +73,7 @@ Sub GenerateAllRICs()
         .Range("D1").Value = "Type"
         .Range("E1").Value = "Month Code"
         .Range("F1").Value = "Year"
-        .Range("G1").Value = "Underlying"
+        .Range("G1").Value = "Underlying LSEG"
         .Range("H1").Value = "Bloom_Ticker"  ' Bloomberg ticker
         .Range("I1").Value = "Processed"     ' Processing status (shifted from H)
         .Range("A1:I1").Font.Bold = True
@@ -1014,10 +1014,11 @@ Function SetupRICListSheetForChain() As Worksheet
         .Range("D1").Value = "Type"
         .Range("E1").Value = "Month Code"
         .Range("F1").Value = "Year"
-        .Range("G1").Value = "Underlying"
-        .Range("H1").Value = "Processed"
-        .Range("A1:H1").Font.Bold = True
-        .Range("A1:H1").Interior.Color = RGB(200, 200, 200)
+        .Range("G1").Value = "Underlying LSEG"
+        .Range("H1").Value = "Bloom_Ticker"
+        .Range("I1").Value = "Processed"
+        .Range("A1:I1").Font.Bold = True
+        .Range("A1:I1").Interior.Color = RGB(200, 200, 200)
     End With
 
     Set SetupRICListSheetForChain = ws
