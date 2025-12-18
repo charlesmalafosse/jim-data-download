@@ -479,6 +479,30 @@ Sub MainDownloadProcess()
         Exit Sub
     End If
 
+    ' Check that all RICs have underlying ticker filled in
+    Dim missingUnderlyingRow As Long
+    If Not CheckAllUnderlyingsFilled(missingUnderlyingRow) Then
+        MsgBox "Missing underlying ticker in RIC_List!" & vbNewLine & vbNewLine & _
+               "Row " & missingUnderlyingRow & " (and possibly others) is missing the underlying ticker in column G." & vbNewLine & _
+               "Please fill in all underlying tickers before running the download.", _
+               vbExclamation, "Missing Underlying Ticker"
+        Application.StatusBar = False
+        Exit Sub
+    End If
+
+    ' Check that all underlyings exist in Future et co with actual data
+    Application.StatusBar = "Checking underlyings have data in Future et co..."
+    Dim missingUnderlyingData As String
+    If Not CheckUnderlyingsHaveData(missingUnderlyingData) Then
+        MsgBox "Missing underlying data in 'Future et co' sheet!" & vbNewLine & vbNewLine & _
+               "The following underlyings are missing or have no data:" & vbNewLine & _
+               missingUnderlyingData & vbNewLine & vbNewLine & _
+               "Please download the underlying futures data first.", _
+               vbExclamation, "Missing Underlying Data"
+        Application.StatusBar = False
+        Exit Sub
+    End If
+
     totalRICs = CountUnprocessedRICs()
 
     ' Show summary
@@ -1358,17 +1382,144 @@ End Sub
 
 Function CheckRICListExists() As Boolean
     Dim ws As Worksheet
-    
+
     On Error Resume Next
     Set ws = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
     On Error GoTo 0
-    
+
     If ws Is Nothing Then
         CheckRICListExists = False
     Else
         ' Check if there's data beyond header
         CheckRICListExists = ws.Cells(ws.Rows.count, "A").End(xlUp).Row > 1
     End If
+End Function
+
+Function CheckAllUnderlyingsFilled(ByRef missingRow As Long) As Boolean
+    ' Checks that all rows in RIC_List have an underlying ticker in column G
+    ' Returns True if all filled, False if any are missing
+    ' missingRow returns the first row with missing underlying (0 if all filled)
+    Dim ws As Worksheet
+    Dim lastRow As Long
+    Dim i As Long
+
+    Set ws = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
+    lastRow = ws.Cells(ws.Rows.count, "A").End(xlUp).Row
+
+    missingRow = 0
+
+    For i = 2 To lastRow
+        If Trim(ws.Cells(i, 7).Value) = "" Then  ' Column G: Underlying LSEG
+            missingRow = i
+            CheckAllUnderlyingsFilled = False
+            Exit Function
+        End If
+    Next i
+
+    CheckAllUnderlyingsFilled = True
+End Function
+
+Function CheckUnderlyingsHaveData(ByRef missingList As String) As Boolean
+    ' Checks that all unique underlyings from RIC_List exist in Future et co with actual data
+    ' Returns True if all have data, False if any are missing
+    ' missingList returns comma-separated list of underlyings without data
+    Dim wsRIC As Worksheet
+    Dim wsFuture As Worksheet
+    Dim uniqueUnderlyings As Collection
+    Dim i As Long
+    Dim lastRow As Long
+    Dim underlyingValue As String
+    Dim startCol As Long
+    Dim startRow As Long
+    Dim underlyingCol As Long
+    Dim dataCount As Long
+
+    Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
+    Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
+    Set uniqueUnderlyings = New Collection
+
+    missingList = ""
+
+    ' Step 1: Extract unique underlyings from RIC_List column G
+    lastRow = wsRIC.Cells(wsRIC.Rows.count, "A").End(xlUp).Row
+
+    For i = 2 To lastRow
+        underlyingValue = Trim(CStr(wsRIC.Cells(i, 7).Value))
+        If underlyingValue <> "" Then
+            On Error Resume Next
+            uniqueUnderlyings.Add underlyingValue, underlyingValue
+            On Error GoTo 0
+        End If
+    Next i
+
+    If uniqueUnderlyings.count = 0 Then
+        CheckUnderlyingsHaveData = True
+        Exit Function
+    End If
+
+    ' Step 2: Get starting position from RANGE_DOWNLOAD
+    On Error Resume Next
+    startCol = wsFuture.Range(RANGE_DOWNLOAD).Column
+    startRow = wsFuture.Range(RANGE_DOWNLOAD).Row
+    On Error GoTo 0
+
+    If startCol = 0 Or startRow = 0 Then
+        missingList = "Cannot find RANGE_DOWNLOAD in Future et co"
+        CheckUnderlyingsHaveData = False
+        Exit Function
+    End If
+
+    ' Step 3: Check each unique underlying exists and has data
+    Dim underlying As Variant
+    Dim foundCol As Long
+    Dim currentCol As Long
+    Dim foundUnderlying As String
+
+    For Each underlying In uniqueUnderlyings
+        foundCol = 0
+
+        ' Search for underlying in Future et co (every 3rd column)
+        currentCol = startCol
+        Do While currentCol <= 100
+            foundUnderlying = Trim(CStr(wsFuture.Cells(startRow, currentCol).Value))
+
+            If foundUnderlying = CStr(underlying) Then
+                foundCol = currentCol
+                Exit Do
+            End If
+
+            currentCol = currentCol + 3
+
+            ' Exit if empty blocks
+            If wsFuture.Cells(startRow, currentCol).Value = "" And _
+               wsFuture.Cells(startRow, currentCol + 3).Value = "" Then
+                Exit Do
+            End If
+        Loop
+
+        ' Check if found and has data
+        If foundCol = 0 Then
+            ' Underlying not found in Future et co
+            If missingList <> "" Then missingList = missingList & ", "
+            missingList = missingList & CStr(underlying) & " (not found)"
+        Else
+            ' Found - check if there's actual price data (check a few rows below header)
+            dataCount = 0
+            For i = startRow + 2 To startRow + 10
+                If IsNumeric(wsFuture.Cells(i, foundCol).Value) And _
+                   wsFuture.Cells(i, foundCol).Value <> 0 Then
+                    dataCount = dataCount + 1
+                End If
+            Next i
+
+            If dataCount = 0 Then
+                If missingList <> "" Then missingList = missingList & ", "
+                missingList = missingList & CStr(underlying) & " (no data)"
+            End If
+        End If
+    Next underlying
+
+    CheckUnderlyingsHaveData = (missingList = "")
 End Function
 
 Function CountUnprocessedRICs() As Long

@@ -414,15 +414,57 @@ if __name__ == "__main__":
     #        --filter "Premium>0" \
     #        --output combined_options.csv
     #
-    sys.argv = [
-        "aggregate_files.py",
-        "--input-dir", "..",
-        "--pattern", "*_batch*.csv",
-        "--override", "ccy_pair=EUR/USD",
-        "--override", "Lot_size=100",
-        # "--filter", "Premium>0",
-        # "--output", "debug_output.csv",
-        "--dry-run",  # Remove this to actually write the file
-    ]
 
+    ###########################################################################################################
+    # BTP
+    ###########################################################################################################
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\BTP\\done\\expired","--pattern", "*_batch*.csv",
+        "--output", "btp_expired_20251001-20251212.csv",
+    ]
     main()
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\BTP\\done\\live","--pattern", "*_batch*.csv",
+        "--output", "btp_live_20251001-20251212.csv",
+    ]    
+    main()
+
+    ###########################################################################################################
+    # TY
+    ###########################################################################################################
+    
+    ## MONDAY #################################################
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\TY1\\done\\expired_mondays","--pattern", "*_batch*.csv",
+        "--output", "ty_weekly_monday_expired_20251001-20251212.csv",
+    ]
+    main()
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\TY1\\done\\live_monday","--pattern", "*_batch*.csv",
+        "--output", "ty_weekly_monday_live_20251001-20251212.csv",
+    ]     
+    main() 
+
+    ## WEDNESDAY #################################################
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\TY1\\done\\expired_wednesdays","--pattern", "*_batch*.csv",
+        "--output", "ty_weekly_wednesday_expired_20251001-20251212.csv",
+    ]
+    main()
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\TY1\\done\\live_wednesday","--pattern", "*_batch*.csv",
+        "--output", "ty_weekly_wednesday_live_20251001-20251212.csv",
+    ]     
+    main() 
+
+    ## FRIDAY #################################################
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\TY1\\done\\expired_fridays","--pattern", "*_batch*.csv",
+        "--output", "ty_weekly_friday_expired_20251001-20251212.csv",
+    ]
+    main()
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\TY1\\done\\live_friday","--pattern", "*_batch*.csv",
+        "--output", "ty_weekly_friday_live_20251001-20251212.csv",
+    ]     
+    main()     
