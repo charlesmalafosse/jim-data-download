@@ -1,5 +1,5 @@
 ' ============================================
-' MODULE 1: Global Configuration and Types
+' MODULE OPTIONDOWNLOAD
 ' ============================================
 
 Option Explicit
@@ -329,15 +329,14 @@ Sub RefreshFutureUnderlyings()
     g_FutureFormulaStartCol = startCol - 1  ' First RHistory formula column
     g_FutureFormulaStartRow = startRow + 2  ' First RHistory data row
 
-    ' Step 6: Start LSEG refresh (non-blocking with OnTime)
+    ' Step 6: Start LSEG refresh (simple pattern matching DownloadFromChain)
     Application.StatusBar = "Starting LSEG refresh for " & arraySize & " underlyings..."
 
-    On Error Resume Next
+    ' Trigger LSEG refresh
     Application.Run "WorkspaceRefreshWorksheet", True, g_FutureRefreshTimeout * 1000, g_FutureSheet.Name
-    On Error GoTo 0
 
-    ' Schedule first check after 3 seconds (release VBA control to let LSEG work)
-    Application.OnTime Now + TimeValue("00:00:03"), "RefreshFutureUnderlyings_CheckReady"
+    ' Schedule check via OnTime (allows LSEG to populate data)
+    Application.OnTime Now + TimeValue("00:00:05"), "RefreshFutureUnderlyings_CheckReady"
     Exit Sub
 
 ErrorHandler:
@@ -987,6 +986,10 @@ Sub SetupRHistoryAndMetadata(ws As Worksheet, startRow As Long, maxRows As Long,
     Dim rfrCol As Long
     Dim rfrLastRow As Long
     Dim spotFormula As String
+    Dim optFreq As String
+    Dim weekNum As Integer
+    Dim rootUnderlyingBB As String
+    Dim optionBloomTicker As String
 
     Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
 
@@ -1004,12 +1007,26 @@ Sub SetupRHistoryAndMetadata(ws As Worksheet, startRow As Long, maxRows As Long,
         rfrLastRow = wsFuture.Cells(wsFuture.Rows.count, 1).End(xlUp).Row
     End If
 
+    ' Get option frequency and Bloomberg root from Config
+    optFreq = GetOptionFrequency()
+    On Error Resume Next
+    rootUnderlyingBB = Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("rootUnderlyingBB").Value)
+    On Error GoTo 0
+
+    ' Build option Bloomberg ticker based on frequency
+    If optFreq = "weekly" Then
+        weekNum = GetWeekNumberFromDate(maturity)
+        optionBloomTicker = RICWeeklyOptionToBloomberg(optionRic, weekNum)
+    Else
+        optionBloomTicker = RICOptionToBloomberg(optionRic, rootUnderlyingBB)
+    End If
+
     endRow = startRow + maxRows - 1
 
     ' Setup basic metadata and VLOOKUP formulas (NO Greek formulas yet)
     For i = startRow To endRow
-        ' Store metadata
-        ws.Cells(i, 3).Value = GetBloombergTicker(underlyingTicker, ricRowRef) & " " & Left(optType, 1) & " " & strike
+        ' Store metadata - Column C: Option Bloomberg ticker
+        ws.Cells(i, 3).Value = optionBloomTicker
         ws.Cells(i, 4).Value = maturity
 
         ' Column E: Interest_rate - VLOOKUP from RFR range with dynamic last row
@@ -1672,13 +1689,25 @@ Function BuildOptionRIC(rootRIC As String, strike As Double, _
     Dim monthCode As String
     Dim yearCode As String
     Dim strikeStr As String
-    
-    monthCode = GetMonthCode(Month(maturityDate), optionType)
+    Dim ricMonth As Integer
+    Dim monthCodeMethod As String
+
+    ' Determine month based on optionMonthCodeMethod
+    monthCodeMethod = GetOptionMonthCodeMethod()
+    If monthCodeMethod = "Same Month" Then
+        ricMonth = Month(maturityDate)
+    Else
+        ' Next Month
+        ricMonth = Month(maturityDate) + 1
+        If ricMonth > 12 Then ricMonth = 1
+    End If
+
+    monthCode = GetMonthCode(ricMonth, optionType)
     yearCode = Right(Year(maturityDate), 1)
     strikeStr = Replace(CStr(strike), ".", "")
-    
+
     BuildOptionRIC = rootRIC & strikeStr & monthCode & yearCode
-    
+
     ' Add suffix for expired options
     If maturityDate < Date Then
         BuildOptionRIC = BuildOptionRIC & "^" & monthCode & yearCode
@@ -1880,7 +1909,13 @@ Sub RetryFailedRICsInBatch(wsCollection As Worksheet, batchStartRow As Long, bat
         If wsRIC.Cells(i, 9).Value = "Error" Then
             ric = wsRIC.Cells(i, 1).Value
             maturityDate = wsRIC.Cells(i, 2).Value
-            maturityMonth = Month(maturityDate)
+            ' Determine month based on optionMonthCodeMethod
+            If GetOptionMonthCodeMethod() = "Same Month" Then
+                maturityMonth = Month(maturityDate)
+            Else
+                maturityMonth = Month(maturityDate) + 1
+                If maturityMonth > 12 Then maturityMonth = 1
+            End If
             yearCode = wsRIC.Cells(i, 6).Value
             monthCodeCall = GetMonthCodeCallFromRIC(ric, maturityMonth)
 
