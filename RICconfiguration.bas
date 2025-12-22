@@ -17,6 +17,7 @@ Public Const WEEKLY_CALL = "weeklyCall"
 Public Const WEEKLY_PUT = "weeklyPut"
 Public Const OPTION_FREQUENCY = "optionFrequency"
 Public Const OPTION_MONTH_CODE_METHOD = "optionMonthCodeMethod"
+Public Const UNDERLYING_MONTH_MODE = "Quarter End"  ' "Same Month" or "Quarter End"
 
 ' OnTime Chain State for DownloadFromChain
 Public g_ChainState As Long
@@ -250,7 +251,13 @@ Function CreateRICInfo(maturityDate As Date, strike As Double, optionType As Str
     End If
 
     ' Get future month code (for underlying RIC/Bloomberg ticker)
-    futureMonthCode = GetFutureMonthCode(ricMonth)
+    Dim underlyingMonth As Integer
+    If UNDERLYING_MONTH_MODE = "Quarter End" Then
+        underlyingMonth = GetQuarterEndMonth(Month(maturityDate))
+    Else
+        underlyingMonth = ricMonth  ' Same Month: use option's month
+    End If
+    futureMonthCode = GetFutureMonthCode(underlyingMonth)
 
     yearCode = Right(CStr(Year(maturityDate)), 2)
 
@@ -395,6 +402,23 @@ Function GetOptionMonthCodeMethod() As String
     Else
         GetOptionMonthCodeMethod = "Same Month"
     End If
+End Function
+
+' ============================================
+' GET QUARTER END MONTH
+' ============================================
+
+Function GetQuarterEndMonth(maturityMonth As Integer) As Integer
+    ' Returns the quarter end month (3, 6, 9, or 12) for the given month
+    ' Used when UNDERLYING_MONTH_MODE = "Quarter End"
+    ' Q1: Dec, Jan, Feb -> March | Q2: Mar, Apr, May -> June
+    ' Q3: Jun, Jul, Aug -> Sep   | Q4: Sep, Oct, Nov -> December
+    Select Case maturityMonth
+        Case 12, 1, 2: GetQuarterEndMonth = 3   ' Q1 -> March
+        Case 3, 4, 5: GetQuarterEndMonth = 6    ' Q2 -> June
+        Case 6, 7, 8: GetQuarterEndMonth = 9    ' Q3 -> September
+        Case 9, 10, 11: GetQuarterEndMonth = 12 ' Q4 -> December
+    End Select
 End Function
 
 ' ============================================
