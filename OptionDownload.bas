@@ -759,7 +759,7 @@ Sub ProcessBatch_ProcessResults()
     'Application.Calculate
 
     Application.StatusBar = "Batch #" & g_BatchCounter & ": Saving to CSV..."
-    SaveStagingToCSV g_BatchCounter
+    SaveStagingToCSV GetBatchNumberFromRow(g_BatchStartRow)
 
     ' Save workbook every 3 batches
     If g_BatchCounter Mod 3 = 0 Then
@@ -988,8 +988,8 @@ Sub SetupRHistoryAndMetadata(ws As Worksheet, startRow As Long, maxRows As Long,
     Dim spotFormula As String
     Dim optFreq As String
     Dim weekNum As Integer
-    Dim rootUnderlyingBB As String
     Dim optionBloomTicker As String
+    Dim underlyingBloomTicker As String
 
     Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
 
@@ -1007,18 +1007,18 @@ Sub SetupRHistoryAndMetadata(ws As Worksheet, startRow As Long, maxRows As Long,
         rfrLastRow = wsFuture.Cells(wsFuture.Rows.count, 1).End(xlUp).Row
     End If
 
-    ' Get option frequency and Bloomberg root from Config
+    ' Get option frequency from Config
     optFreq = GetOptionFrequency()
-    On Error Resume Next
-    rootUnderlyingBB = Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("rootUnderlyingBB").Value)
-    On Error GoTo 0
 
-    ' Build option Bloomberg ticker based on frequency
+    ' Get underlying Bloomberg ticker for building option ticker
+    underlyingBloomTicker = GetBloombergTicker(underlyingTicker, ricRowRef)
+
+    ' Build option Bloomberg ticker using simpler approach with already-available data
     If optFreq = "weekly" Then
         weekNum = GetWeekNumberFromDate(maturity)
-        optionBloomTicker = RICWeeklyOptionToBloomberg(optionRic, weekNum)
+        optionBloomTicker = BuildWeeklyOptionBloombergTicker(underlyingBloomTicker, optType, strike, weekNum)
     Else
-        optionBloomTicker = RICOptionToBloomberg(optionRic, rootUnderlyingBB)
+        optionBloomTicker = BuildOptionBloombergTicker(underlyingBloomTicker, optType, strike)
     End If
 
     endRow = startRow + maxRows - 1
@@ -1057,6 +1057,7 @@ Sub SetupRHistoryAndMetadata(ws As Worksheet, startRow As Long, maxRows As Long,
         ws.Cells(i, 19).Value = GetBloombergTicker(underlyingTicker, ricRowRef)
         ws.Cells(i, 20).Value = g_Currency
         ws.Cells(i, 21).Value = 0
+        ws.Cells(i, 29).Value = underlyingTicker  ' RIC_Underlying (column AC)
     Next i
 End Sub
 
@@ -1214,6 +1215,7 @@ Sub CopyDataRowsToStaging(ws As Worksheet, startRow As Long, maxRows As Long)
             wsDest.Cells(NextRow, 25).Value2 = ws.Cells(i, 27).Value2 ' DVEGA_DVOL (from col AA)
             wsDest.Cells(NextRow, 26).Value2 = ws.Cells(i, 28).Value2 ' DVEGA_DVOLDVOL (from col AB)
             wsDest.Cells(NextRow, 27).Value2 = ws.Cells(i, 16).Value2 ' RIC (from col P - the RIC used for download)
+            wsDest.Cells(NextRow, 28).Value2 = ws.Cells(i, 29).Value2 ' RIC_Underlying (from col AC)
         Else
             ' Check if row is truly empty (no date) vs just having error in premium
             If IsEmpty(ws.Cells(i, 1).Value) Then
@@ -1574,6 +1576,20 @@ Function FindNextUnprocessedRIC(startFrom As Long) As Long
     Next i
     
     FindNextUnprocessedRIC = 0  ' No unprocessed RICs found
+End Function
+
+' Calculate batch number based on row position in RIC_List
+' This ensures batch numbers are consistent even when resuming from a specific row
+Function GetBatchNumberFromRow(startRow As Long) As Long
+    ' Row 2 is first data row (row 1 is header)
+    ' Batch 1 = rows 2 to (2 + batchSize - 1)
+    ' Batch 2 = rows (2 + batchSize) to (2 + 2*batchSize - 1)
+    ' Formula: ((startRow - 2) \ batchSize) + 1
+    If g_BatchSize > 0 Then
+        GetBatchNumberFromRow = ((startRow - 2) \ g_BatchSize) + 1
+    Else
+        GetBatchNumberFromRow = 1
+    End If
 End Function
 
 Sub MarkBatchStatus(startRow As Long, endRow As Long, Status As String)
@@ -2308,8 +2324,9 @@ Sub ClearCollectionSheet()
     ws.Range("Z1").Value = "DGAMMA/DVOL"
     ws.Range("AA1").Value = "DVEGA/DVOL"
     ws.Range("AB1").Value = "DVEGA/DVOLDVOL"
+    ws.Range("AC1").Value = "RIC_Underlying"
 
-    ws.Range("A1:AB1").Font.Bold = True
+    ws.Range("A1:AC1").Font.Bold = True
 
     ' Format column A (Spot_Date) as YYYY-MM-DD hh:mm:ss for CSV export
     ws.Columns("A:A").NumberFormat = "yyyy-mm-dd hh:mm:ss"
@@ -2365,8 +2382,9 @@ Sub SetupStagingSheet()
     ws.Range("Y1").Value = "DVEGA/DVOL"
     ws.Range("Z1").Value = "DVEGA/DVOLDVOL"
     ws.Range("AA1").Value = "RIC"  ' RIC used for download
+    ws.Range("AB1").Value = "RIC_Underlying"
 
-    ws.Range("A1:AA1").Font.Bold = True
+    ws.Range("A1:AB1").Font.Bold = True
 
     ' Format date columns to YYYY-MM-DD hh:mm:ss for CSV export
     ws.Columns("A:A").NumberFormat = "yyyy-mm-dd hh:mm:ss"  ' Spot_Date
