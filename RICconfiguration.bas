@@ -44,7 +44,44 @@ Sub GenerateAllRICs()
     Dim ricDict As Object  ' Dictionary instead of custom type
     Dim i As Long
     Dim lastRow As Long
-    
+    Dim methodRICBB As String
+    Dim rootUnderlyingBB As String
+    Dim rootUnderlyingRIC As String
+    Dim underlyingRIC As String
+
+    ' Read Bloomberg conversion config
+    methodRICBB = ""
+    rootUnderlyingBB = ""
+    rootUnderlyingRIC = ""
+    On Error Resume Next
+    methodRICBB = Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("methodRICBB").Value)
+    rootUnderlyingBB = Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("rootUnderlyingBB").Value)
+    rootUnderlyingRIC = Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("rootUnderlyingRIC").Value)
+    On Error GoTo 0
+
+    ' Validate Bloomberg config
+    If UCase(methodRICBB) <> "FUTURE" Then
+        MsgBox "Invalid or missing 'methodRICBB' in Config sheet!" & vbNewLine & _
+               "Current value: '" & methodRICBB & "'" & vbNewLine & _
+               "Supported methods: 'Future'", _
+               vbCritical, "Configuration Error"
+        Exit Sub
+    End If
+
+    If rootUnderlyingBB = "" Then
+        MsgBox "Missing 'rootUnderlyingBB' named range in Config sheet!" & vbNewLine & _
+               "Please set the Bloomberg root ticker for the underlying.", _
+               vbCritical, "Configuration Error"
+        Exit Sub
+    End If
+
+    If rootUnderlyingRIC = "" Then
+        MsgBox "Missing 'rootUnderlyingRIC' named range in Config sheet!" & vbNewLine & _
+               "Please set the LSEG RIC root for the underlying (e.g., 'FGBM').", _
+               vbCritical, "Configuration Error"
+        Exit Sub
+    End If
+
     ' Generate all RICs
     Set ricList = BuildCompleteRICList()
     
@@ -92,9 +129,11 @@ Sub GenerateAllRICs()
             .Cells(i, 4).Value = ricDict("OptionType")
             .Cells(i, 5).Value = ricDict("MonthCode")
             .Cells(i, 6).Value = ricDict("YearCode")
-            ' Column G (Underlying) left empty - no LSEG formula needed
-            ' Column H: Bloomberg ticker
-            .Cells(i, 8).Value = BuildBloombergTicker(ricDict("OptionType"), ricDict("Strike"), ricDict("Maturity"))
+            ' Column G: Build underlying RIC from root + month code + year code
+            underlyingRIC = rootUnderlyingRIC & ricDict("MonthCode") & ricDict("YearCode")
+            .Cells(i, 7).Value = underlyingRIC
+            ' Column H: Bloomberg ticker from underlying RIC
+            .Cells(i, 8).Value = RICToBloomberg(underlyingRIC, rootUnderlyingBB)
             ' Column I: Initialize Processed column as "No"
             .Cells(i, 9).Value = "No"
         End With
@@ -340,6 +379,90 @@ Function BuildBloombergTicker(optionType As String, strike As Double, maturityDa
     End If
 
     BuildBloombergTicker = rootBB & " " & Left(optionType, 1) & " " & strike & " " & Format(maturityDate, "mm/dd/yyyy")
+End Function
+
+Function RICToBloomberg(RIC As String, BBGRoot As String) As String
+    '-----------------------------------------------------------
+    ' Converts a Reuters RIC futures ticker to Bloomberg format
+    ' Inputs:
+    '   RIC     - Reuters ticker (e.g., "FGBMZ5", "FGBMZ25")
+    '   BBGRoot - Bloomberg root (e.g., "OE")
+    ' Output:
+    '   Bloomberg ticker (e.g., "OEZ25 Comdty")
+    '-----------------------------------------------------------
+
+    Dim MonthCode As String
+    Dim YearPart As String
+    Dim YearNum As Integer
+    Dim i As Integer
+    Dim ValidMonths As String
+    Dim ws As Worksheet
+    Dim rng As Range
+    Dim cell As Range
+
+    ' Build ValidMonths from monthFutureBloomberg named range
+    Set ws = ThisWorkbook.Sheets(SHEET_CONFIG)
+    On Error Resume Next
+    Set rng = ws.Range("monthFutureBloomberg")
+    On Error GoTo ErrorHandler
+
+    If rng Is Nothing Then
+        RICToBloomberg = "#ERROR: Missing 'monthFutureBloomberg' range in Config"
+        Exit Function
+    End If
+
+    ValidMonths = ""
+    For Each cell In rng
+        If Trim(cell.Value) <> "" Then
+            ValidMonths = ValidMonths & Trim(cell.Value)
+        End If
+    Next cell
+
+    On Error GoTo ErrorHandler
+
+    ' Trim input
+    RIC = Trim(UCase(RIC))
+    BBGRoot = Trim(UCase(BBGRoot))
+
+    ' Validate inputs
+    If Len(RIC) < 2 Or Len(BBGRoot) = 0 Then
+        RICToBloomberg = "#ERROR: Invalid input"
+        Exit Function
+    End If
+
+    ' Extract year (last 1-2 digits from end)
+    If IsNumeric(Right(RIC, 2)) Then
+        YearPart = Right(RIC, 2)
+        MonthCode = Mid(RIC, Len(RIC) - 2, 1)
+    ElseIf IsNumeric(Right(RIC, 1)) Then
+        YearPart = Right(RIC, 1)
+        MonthCode = Mid(RIC, Len(RIC) - 1, 1)
+    Else
+        RICToBloomberg = "#ERROR: Cannot extract year"
+        Exit Function
+    End If
+
+    ' Validate month code
+    If InStr(ValidMonths, MonthCode) = 0 Then
+        RICToBloomberg = "#ERROR: Invalid month code"
+        Exit Function
+    End If
+
+    ' Convert year to 2-digit format
+    YearNum = CInt(YearPart)
+    If YearNum < 10 Then
+        YearPart = "2" & YearNum
+    ElseIf YearNum >= 10 And YearNum < 100 Then
+        YearPart = CStr(YearNum)
+    End If
+
+    ' Build Bloomberg ticker
+    RICToBloomberg = BBGRoot & MonthCode & YearPart & " Comdty"
+    Exit Function
+
+ErrorHandler:
+    RICToBloomberg = "#ERROR: " & Err.Description
+
 End Function
 
 ' ============================================
@@ -1095,6 +1218,17 @@ Sub ProcessSingleColumnOptions(chainSheet As Worksheet, ricListSheet As Workshee
     Dim monthCode As String
     Dim yearCode As String
     Dim RICvalue As String
+    Dim methodRICBB As String
+    Dim rootUnderlyingBB As String
+    Dim underlyingRIC As String
+
+    ' Read Bloomberg conversion method from Config
+    methodRICBB = ""
+    rootUnderlyingBB = ""
+    On Error Resume Next
+    methodRICBB = Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("methodRICBB").Value)
+    rootUnderlyingBB = Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("rootUnderlyingBB").Value)
+    On Error GoTo 0
 
     ' Find last row with data in this column
     lastRow = chainSheet.Cells(chainSheet.Rows.count, optionColumn).End(xlUp).Row
@@ -1122,10 +1256,26 @@ Sub ProcessSingleColumnOptions(chainSheet As Worksheet, ricListSheet As Workshee
             .Cells(ricListRow, 5).Value = "n/a" ' Month Code
             .Cells(ricListRow, 6).Value = "n/a"  ' Year
             .Cells(ricListRow, 7).Value = chainSheet.Cells(i, optionColumn + 5).Value ' Underlying
-            .Cells(ricListRow, 8).Value = BuildBloombergTicker( _
-                CStr(chainSheet.Cells(i, optionColumn + 4).Value), _
-                CDbl(chainSheet.Cells(i, optionColumn + 2).Value), _
-                CDate(chainSheet.Cells(i, optionColumn + 3).Value))  ' Bloom_Ticker
+
+            ' Build Bloomberg ticker based on methodRICBB
+            underlyingRIC = CStr(chainSheet.Cells(i, optionColumn + 5).Value)
+            If UCase(methodRICBB) = "FUTURE" Then
+                If rootUnderlyingBB = "" Then
+                    MsgBox "Missing 'rootUnderlyingBB' named range in Config sheet!" & vbNewLine & _
+                           "Please set the Bloomberg root ticker for the underlying.", _
+                           vbCritical, "Configuration Error"
+                    Exit Sub
+                End If
+                ' Convert underlying RIC to Bloomberg format
+                .Cells(ricListRow, 8).Value = RICToBloomberg(underlyingRIC, rootUnderlyingBB)
+            Else
+                MsgBox "Invalid or missing 'methodRICBB' in Config sheet!" & vbNewLine & _
+                       "Current value: '" & methodRICBB & "'" & vbNewLine & _
+                       "Supported methods: 'Future'", _
+                       vbCritical, "Configuration Error"
+                Exit Sub
+            End If
+
             .Cells(ricListRow, 9).Value = "No"  ' Processed
         End With
         ricListRow = ricListRow + 1
