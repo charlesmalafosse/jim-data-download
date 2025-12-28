@@ -1173,8 +1173,14 @@ Sub CopyDataRowsToStaging(ws As Worksheet, startRow As Long, maxRows As Long)
     Dim wsDest As Worksheet
     Dim NextRow As Long
     Dim cellVal As Variant
+    Dim internalIdValue As String
 
     Set wsDest = ThisWorkbook.Worksheets(SHEET_STAGING)
+
+    ' Get Internal_ID from Config named range
+    On Error Resume Next
+    internalIdValue = Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("internalId").Value)
+    On Error GoTo 0
 
     endRow = startRow + maxRows - 1
 
@@ -1205,17 +1211,18 @@ Sub CopyDataRowsToStaging(ws As Worksheet, startRow As Long, maxRows As Long)
             wsDest.Cells(NextRow, 16).Value2 = ws.Cells(i, 18).Value2 ' Name
             wsDest.Cells(NextRow, 17).Value2 = ws.Cells(i, 19).Value2 ' Reference
             wsDest.Cells(NextRow, 18).Value2 = ws.Cells(i, 20).Value2 ' ccy_pair
-            wsDest.Cells(NextRow, 19).Value2 = ws.Cells(i, 21).Value2 ' Dividend
+            wsDest.Cells(NextRow, 19).Value2 = internalIdValue        ' Internal_ID (from Config)
+            wsDest.Cells(NextRow, 20).Value2 = ws.Cells(i, 21).Value2 ' Dividend
             ' DDELTA_DSPOT removed - columns shifted
-            wsDest.Cells(NextRow, 20).Value2 = ws.Cells(i, 22).Value2 ' DDELTA_DVOL (from col V)
-            wsDest.Cells(NextRow, 21).Value2 = ws.Cells(i, 23).Value2 ' DDELTA_DVOLDVOL (from col W)
-            wsDest.Cells(NextRow, 22).Value2 = ws.Cells(i, 24).Value2 ' DDELTA_DTIME (from col X)
-            wsDest.Cells(NextRow, 23).Value2 = ws.Cells(i, 25).Value2 ' DGAMMA_DSPOT (from col Y)
-            wsDest.Cells(NextRow, 24).Value2 = ws.Cells(i, 26).Value2 ' DGAMMA_DVOL (from col Z)
-            wsDest.Cells(NextRow, 25).Value2 = ws.Cells(i, 27).Value2 ' DVEGA_DVOL (from col AA)
-            wsDest.Cells(NextRow, 26).Value2 = ws.Cells(i, 28).Value2 ' DVEGA_DVOLDVOL (from col AB)
-            wsDest.Cells(NextRow, 27).Value2 = ws.Cells(i, 16).Value2 ' RIC (from col P - the RIC used for download)
-            wsDest.Cells(NextRow, 28).Value2 = ws.Cells(i, 29).Value2 ' RIC_Underlying (from col AC)
+            wsDest.Cells(NextRow, 21).Value2 = ws.Cells(i, 22).Value2 ' DDELTA_DVOL (from col V)
+            wsDest.Cells(NextRow, 22).Value2 = ws.Cells(i, 23).Value2 ' DDELTA_DVOLDVOL (from col W)
+            wsDest.Cells(NextRow, 23).Value2 = ws.Cells(i, 24).Value2 ' DDELTA_DTIME (from col X)
+            wsDest.Cells(NextRow, 24).Value2 = ws.Cells(i, 25).Value2 ' DGAMMA_DSPOT (from col Y)
+            wsDest.Cells(NextRow, 25).Value2 = ws.Cells(i, 26).Value2 ' DGAMMA_DVOL (from col Z)
+            wsDest.Cells(NextRow, 26).Value2 = ws.Cells(i, 27).Value2 ' DVEGA_DVOL (from col AA)
+            wsDest.Cells(NextRow, 27).Value2 = ws.Cells(i, 28).Value2 ' DVEGA_DVOLDVOL (from col AB)
+            wsDest.Cells(NextRow, 28).Value2 = ws.Cells(i, 16).Value2 ' RIC (from col P - the RIC used for download)
+            wsDest.Cells(NextRow, 29).Value2 = ws.Cells(i, 29).Value2 ' RIC_Underlying (from col AC)
         Else
             ' Check if row is truly empty (no date) vs just having error in premium
             If IsEmpty(ws.Cells(i, 1).Value) Then
@@ -2373,18 +2380,19 @@ Sub SetupStagingSheet()
     ws.Range("P1").Value = "Name"
     ws.Range("Q1").Value = "Reference"
     ws.Range("R1").Value = "ccy_pair"
-    ws.Range("S1").Value = "Dividend"
-    ws.Range("T1").Value = "DDELTA/DVOL"
-    ws.Range("U1").Value = "DDELTA/DVOLDVOL"
-    ws.Range("V1").Value = "DDELTA/DTIME"
-    ws.Range("W1").Value = "DGAMMA/DSPOT"
-    ws.Range("X1").Value = "DGAMMA/DVOL"
-    ws.Range("Y1").Value = "DVEGA/DVOL"
-    ws.Range("Z1").Value = "DVEGA/DVOLDVOL"
-    ws.Range("AA1").Value = "RIC"  ' RIC used for download
-    ws.Range("AB1").Value = "RIC_Underlying"
+    ws.Range("S1").Value = "Internal_ID"
+    ws.Range("T1").Value = "Dividend"
+    ws.Range("U1").Value = "DDELTA/DVOL"
+    ws.Range("V1").Value = "DDELTA/DVOLDVOL"
+    ws.Range("W1").Value = "DDELTA/DTIME"
+    ws.Range("X1").Value = "DGAMMA/DSPOT"
+    ws.Range("Y1").Value = "DGAMMA/DVOL"
+    ws.Range("Z1").Value = "DVEGA/DVOL"
+    ws.Range("AA1").Value = "DVEGA/DVOLDVOL"
+    ws.Range("AB1").Value = "RIC"  ' RIC used for download
+    ws.Range("AC1").Value = "RIC_Underlying"
 
-    ws.Range("A1:AB1").Font.Bold = True
+    ws.Range("A1:AC1").Font.Bold = True
 
     ' Format date columns to YYYY-MM-DD hh:mm:ss for CSV export
     ws.Columns("A:A").NumberFormat = "yyyy-mm-dd hh:mm:ss"  ' Spot_Date
@@ -2396,8 +2404,8 @@ Sub SetupStagingSheet()
     ws.Columns("F:F").NumberFormat = "General"   ' Spot
     ws.Columns("G:G").NumberFormat = "General"   ' Strike
     ws.Columns("I:N").NumberFormat = "General"   ' Greeks (IV, Delta, Vega, Gamma, Theta, Rho)
-    ws.Columns("S:S").NumberFormat = "General"   ' Dividend
-    ws.Columns("T:Z").NumberFormat = "General"   ' Higher-order Greeks
+    ws.Columns("T:T").NumberFormat = "General"   ' Dividend
+    ws.Columns("U:AA").NumberFormat = "General"  ' Higher-order Greeks
 End Sub
 
 Sub SetupQualitySheet()

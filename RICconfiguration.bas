@@ -18,6 +18,8 @@ Public Const WEEKLY_PUT = "weeklyPut"
 Public Const OPTION_FREQUENCY = "optionFrequency"
 Public Const OPTION_MONTH_CODE_METHOD = "optionMonthCodeMethod"
 Public Const UNDERLYING_MONTH_MODE = "Quarter End"  ' "Same Month" or "Quarter End"
+Public Const OPTION_STRIKE_DECIMALS As Integer = 1  ' 1 or 2 decimal places for strike
+Public Const OPTION_YEAR_DIGITS As Integer = 1      ' 1 or 2 year digits
 
 ' OnTime Chain State for DownloadFromChain
 Public g_ChainState As Long
@@ -131,11 +133,15 @@ Sub GenerateAllRICs()
             .Cells(i, 4).Value = ricDict("OptionType")
             .Cells(i, 5).Value = ricDict("MonthCode")
             .Cells(i, 6).Value = ricDict("YearCode")
-            ' Column G: Build underlying RIC from root + future month code + year code
-            underlyingRIC = rootUnderlyingRIC & ricDict("FutureMonthCode") & ricDict("YearCode")
-            ' Add expiration suffix if maturity date has passed (^decade format, e.g., ^2 for 2020s)
-            If CDate(ricDict("Maturity")) < Date Then
-                underlyingRIC = underlyingRIC & "^" & Left(ricDict("YearCode"), 1)
+            ' Column G: Build underlying RIC from root + future month code + underlying year code
+            underlyingRIC = rootUnderlyingRIC & ricDict("FutureMonthCode") & ricDict("UnderlyingYearCode")
+            ' Add expiration suffix if underlying month/year has passed (^decade format, e.g., ^2 for 2020s)
+            Dim ulYear As Integer
+            Dim underlyingExpiryDate As Date
+            ulYear = 2000 + CInt(ricDict("UnderlyingYearCode"))
+            underlyingExpiryDate = DateSerial(ulYear, ricDict("UnderlyingMonth") + 1, 0)  ' Last day of underlying month
+            If underlyingExpiryDate < Date Then
+                underlyingRIC = underlyingRIC & "^" & Left(ricDict("UnderlyingYearCode"), 1)
             End If
             .Cells(i, 7).Value = underlyingRIC
             ' Column H: Bloomberg ticker from underlying RIC
@@ -252,14 +258,23 @@ Function CreateRICInfo(maturityDate As Date, strike As Double, optionType As Str
 
     ' Get future month code (for underlying RIC/Bloomberg ticker)
     Dim underlyingMonth As Integer
+    Dim underlyingYear As Integer
+    underlyingYear = Year(maturityDate)
+
     If UNDERLYING_MONTH_MODE = "Quarter End" Then
         underlyingMonth = GetQuarterEndMonth(Month(maturityDate))
+        ' If maturity is in Dec (Q1) and quarter end is March, it's next year
+        If Month(maturityDate) = 12 And underlyingMonth = 3 Then
+            underlyingYear = underlyingYear + 1
+        End If
     Else
         underlyingMonth = ricMonth  ' Same Month: use option's month
     End If
     futureMonthCode = GetFutureMonthCode(underlyingMonth)
 
-    yearCode = Right(CStr(Year(maturityDate)), 2)
+    yearCode = Right(CStr(Year(maturityDate)), OPTION_YEAR_DIGITS)
+    Dim underlyingYearCode As String
+    underlyingYearCode = Right(CStr(underlyingYear), OPTION_YEAR_DIGITS)
 
     ' Use appropriate strike formatter based on frequency
     If optFrequency = "weekly" Then
@@ -275,6 +290,8 @@ Function CreateRICInfo(maturityDate As Date, strike As Double, optionType As Str
     ricDict.Add "OptionType", optionType
     ricDict.Add "MonthCode", monthCode
     ricDict.Add "FutureMonthCode", futureMonthCode
+    ricDict.Add "UnderlyingMonth", underlyingMonth  ' Month number for underlying (used for expiry check)
+    ricDict.Add "UnderlyingYearCode", underlyingYearCode  ' Year code for underlying (may differ from option year if Dec->Mar)
     ricDict.Add "YearCode", yearCode
 
     Set CreateRICInfo = ricDict
@@ -313,14 +330,17 @@ End Function
 Function FormatStrikeForRIC(strike As Double) As String
     Dim strikeStr As String
 
-    ' Strike formatting: 5 characters with 2 decimals, unless strike > 999.999 then 1 decimal
-    ' Examples: 100.00 -> "10000", 75.50 -> "7550", 1500.5 -> "15005"
-    If strike > 999.999 Then
-        ' 1 decimal place for large strikes
+    ' Strike formatting controlled by OPTION_STRIKE_DECIMALS constant
+    If OPTION_STRIKE_DECIMALS = 1 Then
+        ' 1 decimal place: 111 -> "1110", 120 -> "1200", 112.5 -> "1125"
         strikeStr = Format(strike, "0.0")
     Else
-        ' 2 decimal places for smaller strikes
-        strikeStr = Format(strike, "0.00")
+        ' 2 decimal places: 111 -> "11100", 120 -> "12000"
+        If strike > 999.999 Then
+            strikeStr = Format(strike, "0.0")
+        Else
+            strikeStr = Format(strike, "0.00")
+        End If
     End If
 
     ' Remove decimal point
