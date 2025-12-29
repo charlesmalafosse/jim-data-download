@@ -135,13 +135,13 @@ Sub GenerateAllRICs()
             .Cells(i, 6).Value = ricDict("YearCode")
             ' Column G: Build underlying RIC from root + future month code + underlying year code
             underlyingRIC = rootUnderlyingRIC & ricDict("FutureMonthCode") & ricDict("UnderlyingYearCode")
-            ' Add expiration suffix if underlying month/year has passed (^decade format, e.g., ^2 for 2020s)
+            ' Add expiration suffix if underlying has expired (^decade format: ^2 for 2020s, ^3 for 2030s)
             Dim ulYear As Integer
             Dim underlyingExpiryDate As Date
             ulYear = 2000 + CInt(ricDict("UnderlyingYearCode"))
             underlyingExpiryDate = DateSerial(ulYear, ricDict("UnderlyingMonth") + 1, 0)  ' Last day of underlying month
             If underlyingExpiryDate < Date Then
-                underlyingRIC = underlyingRIC & "^" & Left(ricDict("UnderlyingYearCode"), 1)
+                underlyingRIC = underlyingRIC & "^" & CStr((ulYear - 2000) \ 10)
             End If
             .Cells(i, 7).Value = underlyingRIC
             ' Column H: Bloomberg ticker from underlying RIC
@@ -274,7 +274,7 @@ Function CreateRICInfo(maturityDate As Date, strike As Double, optionType As Str
 
     yearCode = Right(CStr(Year(maturityDate)), OPTION_YEAR_DIGITS)
     Dim underlyingYearCode As String
-    underlyingYearCode = Right(CStr(underlyingYear), OPTION_YEAR_DIGITS)
+    underlyingYearCode = Right(CStr(underlyingYear), 2)  ' Futures always use 2-digit years
 
     ' Use appropriate strike formatter based on frequency
     If optFrequency = "weekly" Then
@@ -1059,50 +1059,6 @@ Function GetFutureMonthCode(monthNum As Integer) As String
 End Function
 
 ' ============================================
-' UTILITY FUNCTIONS FOR WORKING WITH RIC DICTIONARIES
-' ============================================
-
-Sub TestRICGeneration()
-    ' Test function to generate a few sample RICs
-    Dim testDate As Date
-    Dim ricDict As Object
-    
-    ' Test date (use first maturity from Config)
-    On Error Resume Next
-    testDate = ThisWorkbook.Sheets(SHEET_CONFIG).Range("maturityDate").Cells(1, 1).Value
-    On Error GoTo 0
-    
-    If Not IsDate(testDate) Then
-        MsgBox "Please add a maturity date in Config sheet", vbExclamation
-        Exit Sub
-    End If
-    
-    ' Generate sample RICs
-    Debug.Print "Sample RIC Generation Test:"
-    Debug.Print "============================"
-    
-    ' Test PUT
-    Set ricDict = CreateRICInfo(testDate, 6000, "PUT")
-    Debug.Print "PUT 6000: " & ricDict("FullRIC")
-    Debug.Print "  Maturity: " & ricDict("Maturity")
-    Debug.Print "  Month Code: " & ricDict("MonthCode")
-    
-    Set ricDict = CreateRICInfo(testDate, 6500, "PUT")
-    Debug.Print "PUT 6500: " & ricDict("FullRIC")
-    
-    ' Test CALL
-    Set ricDict = CreateRICInfo(testDate, 7000, "CALL")
-    Debug.Print "CALL 7000: " & ricDict("FullRIC")
-    Debug.Print "  Maturity: " & ricDict("Maturity")
-    Debug.Print "  Month Code: " & ricDict("MonthCode")
-    
-    Set ricDict = CreateRICInfo(testDate, 7500, "CALL")
-    Debug.Print "CALL 7500: " & ricDict("FullRIC")
-    
-    MsgBox "Test complete! Check Immediate Window (Ctrl+G) for results", vbInformation
-End Sub
-
-' ============================================
 ' GET SPECIFIC RIC FOR OPTION
 ' ============================================
 
@@ -1145,28 +1101,6 @@ Function BuildRICLookupDictionary() As Object
     Set BuildRICLookupDictionary = lookupDict
 End Function
 
-' ============================================
-' EXAMPLE: USE LOOKUP DICTIONARY
-' ============================================
-
-Sub ExampleUseLookupDictionary()
-    Dim lookupDict As Object
-    Dim searchKey As String
-    Dim foundRIC As String
-    
-    ' Build lookup dictionary once
-    Set lookupDict = BuildRICLookupDictionary()
-    
-    ' Example lookup
-    searchKey = "7000_20251017_PUT"  ' Strike_YYYYMMDD_Type
-    
-    If lookupDict.Exists(searchKey) Then
-        foundRIC = lookupDict(searchKey)
-        Debug.Print "Found RIC: " & foundRIC
-    Else
-        Debug.Print "RIC not found for key: " & searchKey
-    End If
-End Sub
 
 ' ============================================
 ' DOWNLOAD FROM OPTION CHAIN
