@@ -236,6 +236,10 @@ Function CreateRICInfo(maturityDate As Date, strike As Double, optionType As Str
     optFrequency = GetOptionFrequency()
     monthCodeMethod = GetOptionMonthCodeMethod()
 
+    ' Track option year (may differ from maturity year if month rolls over Dec->Jan)
+    Dim optionYear As Integer
+    optionYear = Year(maturityDate)  ' Default to maturity year
+
     ' Get type/month code based on frequency and month code method
     If optFrequency = "weekly" Then
         ' Weekly: always use actual maturity month for month code
@@ -250,7 +254,10 @@ Function CreateRICInfo(maturityDate As Date, strike As Double, optionType As Str
         Else
             ' Next Month: use following month for month code lookup
             ricMonth = Month(maturityDate) + 1
-            If ricMonth > 12 Then ricMonth = 1
+            If ricMonth > 12 Then
+                ricMonth = 1
+                optionYear = Year(maturityDate) + 1  ' Year rolls over with month
+            End If
         End If
         monthCode = GetMonthCodeFromTable(ricMonth, optionType)
         monthCodeCallForExpiredRIC = GetMonthCodeFromTable(ricMonth, "CALL")
@@ -272,7 +279,7 @@ Function CreateRICInfo(maturityDate As Date, strike As Double, optionType As Str
     End If
     futureMonthCode = GetFutureMonthCode(underlyingMonth)
 
-    yearCode = Right(CStr(Year(maturityDate)), OPTION_YEAR_DIGITS)
+    yearCode = Right(CStr(optionYear), OPTION_YEAR_DIGITS)
     Dim underlyingYearCode As String
     underlyingYearCode = Right(CStr(underlyingYear), 2)  ' Futures always use 2-digit years
 
@@ -284,7 +291,7 @@ Function CreateRICInfo(maturityDate As Date, strike As Double, optionType As Str
     End If
 
     ' Populate dictionary
-    ricDict.Add "FullRIC", BuildRICString(rootRIC, strikeStr, monthCode, yearCode, maturityDate, monthCodeCallForExpiredRIC, optFrequency)
+    ricDict.Add "FullRIC", BuildRICString(rootRIC, strikeStr, monthCode, yearCode, maturityDate, monthCodeCallForExpiredRIC, optFrequency, optionYear)
     ricDict.Add "Maturity", maturityDate
     ricDict.Add "Strike", strike
     ricDict.Add "OptionType", optionType
@@ -301,7 +308,7 @@ End Function
 ' BUILD RIC STRING
 ' ============================================
 
-Function BuildRICString(rootRIC As String, strikeStr As String, monthCode As String, yearCode As String, maturityDate As Date, monthCodeCallForExpiredRIC As String, optFrequency As String) As String
+Function BuildRICString(rootRIC As String, strikeStr As String, monthCode As String, yearCode As String, maturityDate As Date, monthCodeCallForExpiredRIC As String, optFrequency As String, optionYear As Integer) As String
     ' Builds the complete RIC string
     ' Monthly format: 1EW7000T25 (rootRIC, strike, monthCode for following month, year)
     ' Weekly format:  1E3W1005L25 (rootRIC minus W, occurrence, W, strike, monthCode for maturity month, year)
@@ -318,8 +325,11 @@ Function BuildRICString(rootRIC As String, strikeStr As String, monthCode As Str
     End If
 
     ' Add ^{monthCode}{yearCode} suffix if maturity date is before today (expired option)
+    ' NOTE: Expired suffix ALWAYS uses 2-digit year, regardless of OPTION_YEAR_DIGITS
     If maturityDate < Date Then
-        BuildRICString = BuildRICString & "^" & monthCodeCallForExpiredRIC & yearCode
+        Dim expiredYearCode As String
+        expiredYearCode = Right(CStr(optionYear), 2)  ' Always 2 digits for expired suffix
+        BuildRICString = BuildRICString & "^" & monthCodeCallForExpiredRIC & expiredYearCode
     End If
 End Function
 
