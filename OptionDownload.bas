@@ -926,7 +926,7 @@ Function FindUnderlyingColumn(underlyingTicker As String) As Long
     If startCol > 0 And startRow > 0 Then
         ' Scan columns in steps of 3 (each underlying uses 3 columns)
         currentCol = startCol
-        Do While currentCol <= 100  ' Reasonable upper limit
+        Do While currentCol <= startCol + 100  ' Reasonable upper limit
             foundUnderlying = Trim(CStr(wsFuture.Cells(startRow, currentCol).Value))
 
             If foundUnderlying = underlyingTicker Then
@@ -1506,7 +1506,7 @@ Function CheckUnderlyingsHaveData(ByRef missingList As String) As Boolean
 
         ' Search for underlying in Future et co (every 3rd column)
         currentCol = startCol
-        Do While currentCol <= 100
+        Do While currentCol <= startCol + 100
             foundUnderlying = Trim(CStr(wsFuture.Cells(startRow, currentCol).Value))
 
             If foundUnderlying = CStr(underlying) Then
@@ -1893,6 +1893,34 @@ Function GetMonthCodeCallFromRIC(ric As String, maturityMonth As Long) As String
     GetMonthCodeCallFromRIC = Mid(monthCodes, maturityMonth, 1)
 End Function
 
+Function ExtractYearCodeFromRIC(ric As String) As String
+    ' Extract year code (1-2 digits) from end of RIC before any ^ suffix
+    ' Examples: "FLG6800O26" -> "26", "OGBL1160V5" -> "5", "FLG6800O26^C26" -> "26"
+    Dim cleanRIC As String
+    Dim i As Long
+    Dim yearDigits As String
+
+    ' Remove ^ suffix if present
+    If InStr(ric, "^") > 0 Then
+        cleanRIC = Left(ric, InStr(ric, "^") - 1)
+    Else
+        cleanRIC = ric
+    End If
+
+    ' Extract trailing digits (1-2)
+    yearDigits = ""
+    For i = Len(cleanRIC) To 1 Step -1
+        If IsNumeric(Mid(cleanRIC, i, 1)) Then
+            yearDigits = Mid(cleanRIC, i, 1) & yearDigits
+            If Len(yearDigits) = 2 Then Exit For
+        Else
+            Exit For
+        End If
+    Next i
+
+    ExtractYearCodeFromRIC = yearDigits
+End Function
+
 Sub RetryFailedRICsInBatch(wsCollection As Worksheet, batchStartRow As Long, batchEndRow As Long)
     ' Retry failed RICs by toggling the expired suffix
     ' Called after initial validation to give failed RICs a second chance
@@ -1940,6 +1968,14 @@ Sub RetryFailedRICsInBatch(wsCollection As Worksheet, batchStartRow As Long, bat
                 If maturityMonth > 12 Then maturityMonth = 1
             End If
             yearCode = wsRIC.Cells(i, 6).Value
+            ' If year code is n/a or empty, extract from RIC
+            If yearCode = "n/a" Or yearCode = "" Then
+                yearCode = ExtractYearCodeFromRIC(ric)
+            End If
+            ' Ensure 2-digit year for expired suffix (pad with leading 2 if single digit)
+            If Len(yearCode) = 1 Then
+                yearCode = "2" & yearCode  ' Assumes 2020s decade
+            End If
             monthCodeCall = GetMonthCodeCallFromRIC(ric, maturityMonth)
 
             alternateRIC = GetAlternateRIC(ric, monthCodeCall, yearCode)
@@ -2193,7 +2229,7 @@ Function GetSpotPrice(underlyingTicker As String) As Double
     ' Scan for the underlying ticker (every 3rd column, same pattern as RefreshFutureUnderlyings)
     currentCol = startCol
 
-    While currentCol <= 100  ' Reasonable upper limit
+    While currentCol <= startCol+ 100  ' Reasonable upper limit
         foundUnderlying = Trim(CStr(wsFuture.Cells(startRow, currentCol).Value))
 
         If foundUnderlying = underlyingTicker Then
@@ -2466,7 +2502,7 @@ Function CheckUnderlyings() As Boolean
     Application.StatusBar = "Scanning SHEET_FUTURE for existing underlyings..."
     currentCol = startCol
 
-    While currentCol <= 100 ' Reasonable upper limit
+    While currentCol <= startCol + 100 ' Reasonable upper limit
         foundUnderlying = Trim(CStr(wsFuture.Cells(rowDownload, currentCol).Value))   ' Metadata column
 
         If foundUnderlying <> "" Then

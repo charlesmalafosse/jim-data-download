@@ -18,7 +18,8 @@ Public Const WEEKLY_PUT = "weeklyPut"
 Public Const OPTION_FREQUENCY = "optionFrequency"
 Public Const OPTION_MONTH_CODE_METHOD = "optionMonthCodeMethod"
 Public Const UNDERLYING_MONTH_MODE = "Quarter End"  ' "Same Month" or "Quarter End"
-Public Const OPTION_STRIKE_DECIMALS As Integer = 1  ' 1 or 2 decimal places for strike
+' DEPRECATED - use strikeMultiplier named range in Config sheet instead
+' Public Const OPTION_STRIKE_DECIMALS As Integer = 1  ' 1 or 2 decimal places for strike
 Public Const OPTION_YEAR_DIGITS As Integer = 1      ' 1 or 2 year digits
 
 ' OnTime Chain State for DownloadFromChain
@@ -242,8 +243,17 @@ Function CreateRICInfo(maturityDate As Date, strike As Double, optionType As Str
 
     ' Get type/month code based on frequency and month code method
     If optFrequency = "weekly" Then
-        ' Weekly: always use actual maturity month for month code
-        ricMonth = Month(maturityDate)
+        ' Weekly: apply optionMonthCodeMethod same as monthly
+        If monthCodeMethod = "Same Month" Then
+            ricMonth = Month(maturityDate)
+        Else
+            ' Next Month: use following month for month code lookup
+            ricMonth = Month(maturityDate) + 1
+            If ricMonth > 12 Then
+                ricMonth = 1
+                optionYear = Year(maturityDate) + 1  ' Year rolls over with month
+            End If
+        End If
         monthCode = GetMonthCodeFromTable(ricMonth, optionType)
         monthCodeCallForExpiredRIC = GetMonthCodeFromTable(ricMonth, "CALL")
     Else
@@ -337,26 +347,27 @@ End Function
 ' FORMAT STRIKE FOR RIC
 ' ============================================
 
+Function GetStrikeMultiplier() As Double
+    ' Get strike multiplier from Config sheet
+    ' Default: 10 (1 implied decimal). Use 100 for 2 implied decimals (quarter strikes)
+    On Error Resume Next
+    GetStrikeMultiplier = ThisWorkbook.Sheets(SHEET_CONFIG).Range("strikeMultiplier").Value
+    On Error GoTo 0
+    If GetStrikeMultiplier = 0 Then GetStrikeMultiplier = 10
+End Function
+
 Function FormatStrikeForRIC(strike As Double) As String
-    Dim strikeStr As String
+    ' Format strike for RIC using configurable multiplier
+    ' Examples with multiplier=100: 80.75 -> "8075", 100 -> "10000"
+    Dim strikeInt As Long
+    Dim multiplier As Double
 
-    ' Strike formatting controlled by OPTION_STRIKE_DECIMALS constant
-    If OPTION_STRIKE_DECIMALS = 1 Then
-        ' 1 decimal place: 111 -> "1110", 120 -> "1200", 112.5 -> "1125"
-        strikeStr = Format(strike, "0.0")
-    Else
-        ' 2 decimal places: 111 -> "11100", 120 -> "12000"
-        If strike > 999.999 Then
-            strikeStr = Format(strike, "0.0")
-        Else
-            strikeStr = Format(strike, "0.00")
-        End If
-    End If
+    multiplier = GetStrikeMultiplier()
 
-    ' Remove decimal point
-    strikeStr = Replace(strikeStr, ".", "")
+    ' Multiply and convert to integer (avoids floating point format rounding)
+    strikeInt = CLng(strike * multiplier)
 
-    FormatStrikeForRIC = strikeStr
+    FormatStrikeForRIC = CStr(strikeInt)
 End Function
 
 Function FormatStrikeForWeeklyRIC(strike As Double) As String
