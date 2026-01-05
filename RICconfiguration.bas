@@ -633,7 +633,7 @@ Function BuildOptionBloombergTicker(underlyingBloomTicker As String, optType As 
     If strike = Int(strike) Then
         strikeStr = CStr(CLng(strike))
     Else
-        strikeStr = Format(strike, "0.00")
+        strikeStr = Format(strike, "0.0##")
     End If
 
     ' Build option Bloomberg ticker: "OEZ25 C70"
@@ -653,6 +653,7 @@ Function BuildWeeklyOptionBloombergTicker(underlyingBloomTicker As String, optTy
     '-----------------------------------------------------------
     Dim basePart As String
     Dim rootBB As String
+    Dim rootUnderlyingBB As String
     Dim monthYear As String
     Dim spacePos As Integer
     Dim callPut As String
@@ -666,20 +667,24 @@ Function BuildWeeklyOptionBloombergTicker(underlyingBloomTicker As String, optTy
         basePart = underlyingBloomTicker
     End If
 
-    ' Get rootBB from Config to determine where to split
+    ' Get rootBB (option root) and rootUnderlyingBB (underlying root) from Config
     On Error Resume Next
     rootBB = Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("rootBB").Value)
+    rootUnderlyingBB = Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("rootUnderlyingBB").Value)
     On Error GoTo 0
 
-    ' Split basePart into root and month+year
-    ' e.g., "OEZ25" with rootBB="OE" -> root="OE", monthYear="Z25"
-    If Len(rootBB) > 0 And Left(basePart, Len(rootBB)) = rootBB Then
-        monthYear = Mid(basePart, Len(rootBB) + 1)
+    ' Split basePart into root and month+year using UNDERLYING root
+    ' e.g., "OEZ25" with rootUnderlyingBB="OE" -> monthYear="Z25"
+    If Len(rootUnderlyingBB) > 0 And Left(basePart, Len(rootUnderlyingBB)) = rootUnderlyingBB Then
+        monthYear = Mid(basePart, Len(rootUnderlyingBB) + 1)
     Else
-        ' Fallback: assume 2-character root
-        rootBB = Left(basePart, 2)
+        ' Fallback: assume 2-character underlying root
         monthYear = Mid(basePart, 3)
     End If
+
+    ' Use rootBB (option root) for output; fallback to underlying root if not set
+    If Len(rootBB) = 0 Then rootBB = rootUnderlyingBB
+    If Len(rootBB) = 0 Then rootBB = Left(basePart, 2)
 
     ' Determine Call/Put indicator
     If UCase(Left(optType, 1)) = "C" Then
@@ -692,7 +697,7 @@ Function BuildWeeklyOptionBloombergTicker(underlyingBloomTicker As String, optTy
     If strike = Int(strike) Then
         strikeStr = CStr(CLng(strike))
     Else
-        strikeStr = Format(strike, "0.00")
+        strikeStr = Format(strike, "0.0##")
     End If
 
     ' Build weekly option Bloomberg ticker: "OE2Z25 C100"
@@ -899,7 +904,7 @@ Function RICWeeklyOptionToBloomberg(RIC As String, WeekNum As Integer, _
     If StrikeValue = Int(StrikeValue) Then
         StrikeStr = CStr(Int(StrikeValue))
     Else
-        StrikeStr = Format(StrikeValue, "0.00")
+        StrikeStr = Format(StrikeValue, "0.0##")
     End If
 
     ' Build Bloomberg ticker with week number

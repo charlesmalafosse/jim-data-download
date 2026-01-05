@@ -562,6 +562,7 @@ Sub ProcessAllBatchesFromRICList()
 
     ' Find first unprocessed batch
     batchStart = FindNextUnprocessedRIC(2)
+    g_BatchCounter = (batchStart - 2) / g_BatchSize
     If batchStart = 0 Then
         MsgBox "No unprocessed RICs found!", vbInformation
         Exit Sub
@@ -1576,7 +1577,7 @@ Function FindNextUnprocessedRIC(startFrom As Long) As Long
     lastRow = ws.Cells(ws.Rows.count, "A").End(xlUp).Row
     
     For i = startFrom To lastRow
-        If ws.Cells(i, 9).Value <> "Yes" Then  ' Column I: Processed
+        If ws.Cells(i, 9).Value = "No" Then  ' Column I: Processed
             FindNextUnprocessedRIC = i
             Exit Function
         End If
@@ -2229,7 +2230,7 @@ Function GetSpotPrice(underlyingTicker As String) As Double
     ' Scan for the underlying ticker (every 3rd column, same pattern as RefreshFutureUnderlyings)
     currentCol = startCol
 
-    While currentCol <= startCol+ 100  ' Reasonable upper limit
+    While currentCol <= startCol + 100 ' Reasonable upper limit
         foundUnderlying = Trim(CStr(wsFuture.Cells(startRow, currentCol).Value))
 
         If foundUnderlying = underlyingTicker Then
@@ -2625,6 +2626,8 @@ ErrorHandler:
     Application.DisplayAlerts = True
     Application.StatusBar = "Error saving CSV: " & Err.Description
 End Sub
+
+
 
 
 
