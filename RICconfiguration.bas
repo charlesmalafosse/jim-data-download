@@ -276,13 +276,24 @@ Function CreateRICInfo(maturityDate As Date, strike As Double, optionType As Str
     ' Get future month code (for underlying RIC/Bloomberg ticker)
     Dim underlyingMonth As Integer
     Dim underlyingYear As Integer
+    Dim isQuarterEndMonth As Boolean
     underlyingYear = Year(maturityDate)
 
     If UNDERLYING_MONTH_MODE = "Quarter End" Then
-        underlyingMonth = GetQuarterEndMonth(Month(maturityDate))
-        ' If maturity is in Dec (Q1) and quarter end is March, it's next year
-        If Month(maturityDate) = 12 And underlyingMonth = 3 Then
-            underlyingYear = underlyingYear + 1
+        ' Check if maturity is in a quarter-end month (March, June, September, December)
+        isQuarterEndMonth = (Month(maturityDate) = 3 Or Month(maturityDate) = 6 Or _
+                            Month(maturityDate) = 9 Or Month(maturityDate) = 12)
+
+        If isQuarterEndMonth And monthCodeMethod = "Same Month" Then
+            ' Same Month + quarter-end month: use CURRENT quarter's future
+            underlyingMonth = Month(maturityDate)
+        Else
+            ' Next Month OR not a quarter-end month: use NEXT quarter's future
+            underlyingMonth = GetQuarterEndMonth(Month(maturityDate))
+            ' If maturity is in Dec and underlying is March, it's next year
+            If Month(maturityDate) = 12 And underlyingMonth = 3 Then
+                underlyingYear = underlyingYear + 1
+            End If
         End If
     Else
         underlyingMonth = ricMonth  ' Same Month: use option's month
