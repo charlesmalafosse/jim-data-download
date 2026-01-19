@@ -17,10 +17,10 @@ Public Const WEEKLY_CALL = "weeklyCall"
 Public Const WEEKLY_PUT = "weeklyPut"
 Public Const OPTION_FREQUENCY = "optionFrequency"
 Public Const OPTION_MONTH_CODE_METHOD = "optionMonthCodeMethod"
-Public Const UNDERLYING_MONTH_MODE = "Quarter End"  ' "Same Month" or "Quarter End"
+Public Const UNDERLYING_MONTH_MODE = "Same Month"  ' "Same Month" or "Quarter End", "Next 2 Month"
 ' DEPRECATED - use strikeMultiplier named range in Config sheet instead
 ' Public Const OPTION_STRIKE_DECIMALS As Integer = 1  ' 1 or 2 decimal places for strike
-Public Const OPTION_YEAR_DIGITS As Integer = 1      ' 1 or 2 year digits
+Public Const OPTION_YEAR_DIGITS As Integer = 2      ' 1 or 2 year digits
 
 ' OnTime Chain State for DownloadFromChain
 Public g_ChainState As Long
@@ -221,7 +221,7 @@ Function CreateRICInfo(maturityDate As Date, strike As Double, optionType As Str
     Dim rootRIC As String
     Dim monthCode As String
     Dim monthCodeCallForExpiredRIC As String
-    Dim futureMonthCode As String
+    Dim FutureMonthCode As String
     Dim yearCode As String
     Dim strikeStr As String
     Dim ricDict As Object
@@ -261,6 +261,13 @@ Function CreateRICInfo(maturityDate As Date, strike As Double, optionType As Str
         If monthCodeMethod = "Same Month" Then
             ' Same Month: use maturity month
             ricMonth = Month(maturityDate)
+        ElseIf monthCodeMethod = "Next 2 Month" Then
+            ' Next Month: use following month for month code lookup
+            ricMonth = Month(maturityDate) + 2
+            If ricMonth > 12 Then
+                ricMonth = ricMonth - 12
+                optionYear = Year(maturityDate) + 1  ' Year rolls over with month
+            End If
         Else
             ' Next Month: use following month for month code lookup
             ricMonth = Month(maturityDate) + 1
@@ -276,29 +283,19 @@ Function CreateRICInfo(maturityDate As Date, strike As Double, optionType As Str
     ' Get future month code (for underlying RIC/Bloomberg ticker)
     Dim underlyingMonth As Integer
     Dim underlyingYear As Integer
-    Dim isQuarterEndMonth As Boolean
-    underlyingYear = Year(maturityDate)
+    underlyingYear = optionYear ' Year(maturityDate)
 
     If UNDERLYING_MONTH_MODE = "Quarter End" Then
-        ' Check if maturity is in a quarter-end month (March, June, September, December)
-        isQuarterEndMonth = (Month(maturityDate) = 3 Or Month(maturityDate) = 6 Or _
-                            Month(maturityDate) = 9 Or Month(maturityDate) = 12)
-
-        If isQuarterEndMonth And monthCodeMethod = "Same Month" Then
-            ' Same Month + quarter-end month: use CURRENT quarter's future
-            underlyingMonth = Month(maturityDate)
-        Else
-            ' Next Month OR not a quarter-end month: use NEXT quarter's future
-            underlyingMonth = GetQuarterEndMonth(Month(maturityDate))
-            ' If maturity is in Dec and underlying is March, it's next year
-            If Month(maturityDate) = 12 And underlyingMonth = 3 Then
-                underlyingYear = underlyingYear + 1
-            End If
+        underlyingMonth = GetQuarterEndMonth(Month(maturityDate))
+        ' If maturity is in Dec (Q1) and quarter end is March, it's next year
+        If Month(maturityDate) = 12 And underlyingMonth = 3 Then
+            underlyingYear = underlyingYear + 1
         End If
     Else
         underlyingMonth = ricMonth  ' Same Month: use option's month
+        underlyingYear = optionYear
     End If
-    futureMonthCode = GetFutureMonthCode(underlyingMonth)
+    FutureMonthCode = GetFutureMonthCode(underlyingMonth)
 
     yearCode = Right(CStr(optionYear), OPTION_YEAR_DIGITS)
     Dim underlyingYearCode As String
@@ -317,7 +314,7 @@ Function CreateRICInfo(maturityDate As Date, strike As Double, optionType As Str
     ricDict.Add "Strike", strike
     ricDict.Add "OptionType", optionType
     ricDict.Add "MonthCode", monthCode
-    ricDict.Add "FutureMonthCode", futureMonthCode
+    ricDict.Add "FutureMonthCode", FutureMonthCode
     ricDict.Add "UnderlyingMonth", underlyingMonth  ' Month number for underlying (used for expiry check)
     ricDict.Add "UnderlyingYearCode", underlyingYearCode  ' Year code for underlying (may differ from option year if Dec->Mar)
     ricDict.Add "YearCode", yearCode
@@ -449,11 +446,11 @@ Function GetOptionMonthCodeMethod() As String
     On Error GoTo 0
 
     ' Default to "Next Month" if not set or invalid
-    If LCase(GetOptionMonthCodeMethod) <> "same month" Then
-        GetOptionMonthCodeMethod = "Next Month"
-    Else
-        GetOptionMonthCodeMethod = "Same Month"
-    End If
+'    If LCase(GetOptionMonthCodeMethod) <> "same month" Then
+'        GetOptionMonthCodeMethod = "Next Month"
+'    Else
+'        GetOptionMonthCodeMethod = "Same Month"
+'    End If
 End Function
 
 ' ============================================
@@ -494,7 +491,7 @@ Function BuildBloombergTicker(optionType As String, strike As Double, maturityDa
     BuildBloombergTicker = rootBB & " " & Left(optionType, 1) & " " & strike & " " & Format(maturityDate, "mm/dd/yyyy")
 End Function
 
-Function RICToBloomberg(RIC As String, BBGRoot As String) As String
+Function RICToBloomberg(ric As String, BBGRoot As String) As String
     '-----------------------------------------------------------
     ' Converts a Reuters RIC futures ticker to Bloomberg format
     ' Inputs:
@@ -504,7 +501,7 @@ Function RICToBloomberg(RIC As String, BBGRoot As String) As String
     '   Bloomberg ticker (e.g., "OEZ25 Comdty")
     '-----------------------------------------------------------
 
-    Dim MonthCode As String
+    Dim monthCode As String
     Dim YearPart As String
     Dim YearNum As Integer
     Dim i As Integer
@@ -512,7 +509,7 @@ Function RICToBloomberg(RIC As String, BBGRoot As String) As String
     Dim ws As Worksheet
     Dim rng As Range
     Dim cell As Range
-    Dim CleanRIC As String
+    Dim cleanRIC As String
     Dim CaratPos As Integer
 
     ' Build ValidMonths from monthFutureBloomberg named range
@@ -536,35 +533,35 @@ Function RICToBloomberg(RIC As String, BBGRoot As String) As String
     On Error GoTo ErrorHandler
 
     ' Trim input
-    CleanRIC = Trim(UCase(RIC))
+    cleanRIC = Trim(UCase(ric))
     BBGRoot = Trim(UCase(BBGRoot))
 
     ' Strip expiration suffix (e.g., ^2) if present
-    CaratPos = InStr(CleanRIC, "^")
+    CaratPos = InStr(cleanRIC, "^")
     If CaratPos > 0 Then
-        CleanRIC = Left(CleanRIC, CaratPos - 1)
+        cleanRIC = Left(cleanRIC, CaratPos - 1)
     End If
 
     ' Validate inputs
-    If Len(CleanRIC) < 2 Or Len(BBGRoot) = 0 Then
+    If Len(cleanRIC) < 2 Or Len(BBGRoot) = 0 Then
         RICToBloomberg = "#ERROR: Invalid input"
         Exit Function
     End If
 
     ' Extract year (last 1-2 digits from end)
-    If IsNumeric(Right(CleanRIC, 2)) Then
-        YearPart = Right(CleanRIC, 2)
-        MonthCode = Mid(CleanRIC, Len(CleanRIC) - 2, 1)
-    ElseIf IsNumeric(Right(CleanRIC, 1)) Then
-        YearPart = Right(CleanRIC, 1)
-        MonthCode = Mid(CleanRIC, Len(CleanRIC) - 1, 1)
+    If IsNumeric(Right(cleanRIC, 2)) Then
+        YearPart = Right(cleanRIC, 2)
+        monthCode = Mid(cleanRIC, Len(cleanRIC) - 2, 1)
+    ElseIf IsNumeric(Right(cleanRIC, 1)) Then
+        YearPart = Right(cleanRIC, 1)
+        monthCode = Mid(cleanRIC, Len(cleanRIC) - 1, 1)
     Else
         RICToBloomberg = "#ERROR: Cannot extract year"
         Exit Function
     End If
 
     ' Validate month code
-    If InStr(ValidMonths, MonthCode) = 0 Then
+    If InStr(ValidMonths, monthCode) = 0 Then
         RICToBloomberg = "#ERROR: Invalid month code"
         Exit Function
     End If
@@ -578,7 +575,7 @@ Function RICToBloomberg(RIC As String, BBGRoot As String) As String
     End If
 
     ' Build Bloomberg ticker
-    RICToBloomberg = BBGRoot & MonthCode & YearPart & " Comdty"
+    RICToBloomberg = BBGRoot & monthCode & YearPart & " Comdty"
     Exit Function
 
 ErrorHandler:
@@ -621,7 +618,7 @@ Function BuildOptionBloombergTicker(underlyingBloomTicker As String, optType As 
     '   Option Bloomberg ticker (e.g., "OEZ25 C70")
     '-----------------------------------------------------------
     Dim baseTickerPart As String
-    Dim callPut As String
+    Dim CallPut As String
     Dim strikeStr As String
     Dim spacePos As Integer
 
@@ -635,9 +632,9 @@ Function BuildOptionBloombergTicker(underlyingBloomTicker As String, optType As 
 
     ' Determine Call/Put indicator
     If UCase(Left(optType, 1)) = "C" Then
-        callPut = "C"
+        CallPut = "C"
     Else
-        callPut = "P"
+        CallPut = "P"
     End If
 
     ' Format strike (remove decimals if whole number)
@@ -648,7 +645,7 @@ Function BuildOptionBloombergTicker(underlyingBloomTicker As String, optType As 
     End If
 
     ' Build option Bloomberg ticker: "OEZ25 C70"
-    BuildOptionBloombergTicker = baseTickerPart & " " & callPut & strikeStr
+    BuildOptionBloombergTicker = baseTickerPart & " " & CallPut & strikeStr
 End Function
 
 Function BuildWeeklyOptionBloombergTicker(underlyingBloomTicker As String, optType As String, strike As Double, weekNum As Integer) As String
@@ -667,7 +664,7 @@ Function BuildWeeklyOptionBloombergTicker(underlyingBloomTicker As String, optTy
     Dim rootUnderlyingBB As String
     Dim monthYear As String
     Dim spacePos As Integer
-    Dim callPut As String
+    Dim CallPut As String
     Dim strikeStr As String
 
     ' Strip suffix from underlying ticker: "OEZ25 Comdty" -> "OEZ25"
@@ -699,9 +696,9 @@ Function BuildWeeklyOptionBloombergTicker(underlyingBloomTicker As String, optTy
 
     ' Determine Call/Put indicator
     If UCase(Left(optType, 1)) = "C" Then
-        callPut = "C"
+        CallPut = "C"
     Else
-        callPut = "P"
+        CallPut = "P"
     End If
 
     ' Format strike (remove decimals if whole number)
@@ -712,10 +709,10 @@ Function BuildWeeklyOptionBloombergTicker(underlyingBloomTicker As String, optTy
     End If
 
     ' Build weekly option Bloomberg ticker: "OE2Z25 C100"
-    BuildWeeklyOptionBloombergTicker = rootBB & weekNum & monthYear & " " & callPut & strikeStr
+    BuildWeeklyOptionBloombergTicker = rootBB & weekNum & monthYear & " " & CallPut & strikeStr
 End Function
 
-Function RICWeeklyOptionToBloomberg(RIC As String, WeekNum As Integer, _
+Function RICWeeklyOptionToBloomberg(ric As String, weekNum As Integer, _
     Optional StrikeDivisor As Double = 100) As String
     '-----------------------------------------------------------
     ' Converts a Reuters RIC futures option to Bloomberg format (Weekly)
@@ -801,7 +798,7 @@ Function RICWeeklyOptionToBloomberg(RIC As String, WeekNum As Integer, _
     On Error GoTo ErrorHandler
 
     ' Trim and uppercase input
-    TempRIC = Trim(UCase(RIC))
+    TempRIC = Trim(UCase(ric))
 
     ' Strip expiration suffix if present
     Dim CaratPos As Integer
@@ -821,7 +818,7 @@ Function RICWeeklyOptionToBloomberg(RIC As String, WeekNum As Integer, _
         Exit Function
     End If
 
-    If WeekNum < 1 Or WeekNum > 5 Then
+    If weekNum < 1 Or weekNum > 5 Then
         RICWeeklyOptionToBloomberg = "#ERROR: WeekNum must be 1-5"
         Exit Function
     End If
@@ -911,15 +908,15 @@ Function RICWeeklyOptionToBloomberg(RIC As String, WeekNum As Integer, _
     StrikeValue = CDbl(StrikePart) / StrikeDivisor
 
     ' Format strike
-    Dim StrikeStr As String
+    Dim strikeStr As String
     If StrikeValue = Int(StrikeValue) Then
-        StrikeStr = CStr(Int(StrikeValue))
+        strikeStr = CStr(Int(StrikeValue))
     Else
-        StrikeStr = Format(StrikeValue, "0.0##")
+        strikeStr = Format(StrikeValue, "0.0##")
     End If
 
     ' Build Bloomberg ticker with week number
-    RICWeeklyOptionToBloomberg = BBGRoot & WeekNum & FutureMonthCode & YearPart & " " & CallPut & StrikeStr
+    RICWeeklyOptionToBloomberg = BBGRoot & weekNum & FutureMonthCode & YearPart & " " & CallPut & strikeStr
     Exit Function
 
 ErrorHandler:
@@ -1819,3 +1816,5 @@ Function GetPutCallFromTRResult(chainSheet As Worksheet, rowNum As Long) As Stri
         GetPutCallFromTRResult = ""
     End If
 End Function
+
+

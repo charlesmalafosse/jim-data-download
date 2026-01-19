@@ -417,6 +417,154 @@ if __name__ == "__main__":
     #        --output combined_options.csv
     #
 
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\COMMO\\Brent\\all","--pattern", "*_batch*.csv",
+        "--output", "downloaded_Brent_20260118.csv",
+    ]
+    main()   
+
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\COMMO\\Gasoil\\all","--pattern", "*_batch*.csv",
+        "--output", "downloaded_Gasoil_20260118.csv",
+    ]
+    main()   
+
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\COMMO\\HO\\alloct","--pattern", "*_batch*.csv",
+        "--output", "downloaded_HO_20260118_live.csv",
+    ]
+    main()   
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\COMMO\\HO\\aug-sept","--pattern", "*_batch*.csv",
+        "--output", "downloaded_HO_20260118_aug-sept.csv",
+    ]
+    main()   
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\COMMO\\HO\\rest-2025","--pattern", "*_batch*.csv",
+        "--output", "downloaded_HO_20260118_rest-2025.csv",
+    ]
+    main()   
+
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\COMMO\\NaturalGas\\live","--pattern", "*_batch*.csv",
+        "--output", "downloaded_NaturalGas_20260118_live.csv",
+    ]
+    main()  
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\COMMO\\NaturalGas\\expired","--pattern", "*_batch*.csv",
+        "--output", "downloaded_NaturalGas_20260118_expired.csv",
+    ]
+    main()        
+
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\COMMO\\WTI\\live","--pattern", "*_batch*.csv",
+        "--output", "downloaded_WTI_20260118_live.csv",
+    ]
+    main()  
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\COMMO\\WTI\\expired","--pattern", "*_batch*.csv",
+        "--output", "downloaded_WTI_20260118_expired.csv",
+    ]
+    main()            
+
+# STOP================================
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\FX\\USDAUD\\done","--pattern", "*_batch*.csv",
+        "--output", "downloaded_USDAUD_20251001-20260105.csv",
+    ]
+    main()   
+
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\FX\\USDCHF\\done","--pattern", "*_batch*.csv",
+        "--output", "downloaded_USDCHF_20251001-20260105.csv",
+    ]
+    main()       
+
+    # sys.argv = ["aggregate_files.py",
+    # "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\FX\\USDCAD\\done","--pattern", "*_batch*.csv",
+    #     "--output", "downloaded_USDCAD_20251001-20260105.csv",
+    # ]
+    # main()    
+
+    # sys.argv = ["aggregate_files.py",
+    # "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\FX\\USDEUR\\done","--pattern", "*_batch*.csv",
+    #     "--output", "downloaded_USDEUR_20251001-20260105.csv",
+    # ]
+    # main()    
+
+    # sys.argv = ["aggregate_files.py",
+    # "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\FX\\USDGBP\\done","--pattern", "*_batch*.csv",
+    #     "--output", "downloaded_USDGBP_20251001-20260105.csv",
+    # ]
+    # main()            
+
+
+    ## MONDAY #################################################
+    # sys.argv = ["aggregate_files.py",
+    # "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\TY1_weekly\\monday","--pattern", "*_batch*.csv",
+    #     "--output", "downloaded_ty_weekly_monday_20251001-20260105.csv",
+    # ]
+    #main()
+    ## WEDNESDAY #################################################
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\TY1_weekly\\wednesday","--pattern", "*_batch*.csv",
+        "--output", "downloaded_ty_weekly_wednesday_20251001-20260105.csv",
+    ]
+    main()  
+    ## FRIDAY #################################################
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\TY1_weekly\\friday","--pattern", "*_batch*.csv",
+        "--output", "downloaded_ty_weekly_friday_20251001-20260105.csv",
+    ]
+    main()    
+
+
+
+
+    # ## MONDAY #################################################
+    # sys.argv = ["aggregate_files.py",
+    #     "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\FV1_weekly\\monday",
+    #     "--pattern", "*_batch*.csv",
+    #     "--output", "downloaded_fv1_weekly_monday_20251001-20260105.csv",
+    # ]
+    # main()
+    # ## WEDNESDAY #################################################
+    # sys.argv = ["aggregate_files.py",
+    #     "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\FV1_weekly\\wednesday",
+    #     "--pattern", "*_batch*.csv",
+    #     "--output", "downloaded_fv1_weekly_wednesday_20251001-20260105.csv",
+    # ]
+    # main()
+    # ## FRIDAY #################################################
+    # sys.argv = ["aggregate_files.py",
+    #     "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\FV1_weekly\\friday",
+    #     "--pattern", "*_batch*.csv",
+    #     "--output", "downloaded_fv1_weekly_friday_20251001-20260105.csv",
+    # ]
+    # main()
+
+
+
+
+    # sys.argv = ["aggregate_files.py",
+    #     "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\RX1_weekly\\done_v2",
+    #     "--pattern", "*_batch*.csv",
+    #     "--output", "downloaded_rx1_weekly_all_20251001-20260102.csv",
+    # ]
+    # main()
+
+    # sys.argv = ["aggregate_files.py",
+    # "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\BTP\\done","--pattern", "*_batch*.csv",
+    #     "--output", "downloaded_btp_20251001-20260103.csv",
+    # ]
+    # main()    
+    # sys.argv = ["aggregate_files.py",
+    #     "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\BOBL\\done",
+    #     "--pattern", "*_batch*.csv",
+    #     "--output", "downloaded_bobl_20251001-20260103.csv",
+    # ]
+    # main()
+
     ###########################################################################################################
     # BTP
     ###########################################################################################################
@@ -430,6 +578,7 @@ if __name__ == "__main__":
         "--output", "downloaded_btp_live_20251001-20251212.csv",
     ]    
     main()
+
 
     ###########################################################################################################
     # TY
@@ -472,7 +621,7 @@ if __name__ == "__main__":
     main()
 
     ###########################################################################################################
-    # BOBL (live only)
+    # BOBL 
     ###########################################################################################################
     sys.argv = ["aggregate_files.py",
         "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\BOBL\\live",
@@ -480,6 +629,12 @@ if __name__ == "__main__":
         "--output", "downloaded_bobl_live_20251001-20251222.csv",
     ]
     main()
+    sys.argv = ["aggregate_files.py",
+        "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\BOBL\\expired",
+        "--pattern", "*_batch*.csv",
+        "--output", "downloaded_bobl_expired_20251001-20251222.csv",
+    ]
+    main()    
 
     ###########################################################################################################
     # BUND
