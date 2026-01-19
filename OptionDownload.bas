@@ -2627,7 +2627,204 @@ ErrorHandler:
     Application.StatusBar = "Error saving CSV: " & Err.Description
 End Sub
 
+' ============================================
+' ADD GREEK FORMULAS TO EXTERNAL SHEET (Batch Processing)
+' ============================================
+
+' Entry point: Run from Excel on the active sheet
+Public Sub RunAddGreekFormulasBatch()
+    ' Wrapper to run AddGreekFormulasBatch on the active sheet
+    ' Can be assigned to a button or run from Macros menu
+
+    Dim ws As Worksheet
+    Set ws = ActiveSheet
+
+    ' Confirm with user
+    If MsgBox("Add Greek formulas to all rows in '" & ws.Name & "'?" & vbNewLine & vbNewLine & _
+              "This will process columns I-N (primary Greeks) and U-AA (second-order Greeks)." & vbNewLine & _
+              "Existing values in these columns will be overwritten.", _
+              vbYesNo + vbQuestion, "Add Greek Formulas") = vbNo Then
+        Exit Sub
+    End If
+
+    AddGreekFormulasBatch ws, 500
+End Sub
+
+Public Sub AddGreekFormulasBatch(ws As Worksheet, Optional batchSize As Long = 500)
+    ' Adds Black-Scholes Greek formulas to a sheet with DataCollection structure
+    ' Processes in batches: add formulas -> calculate -> paste values
+    ' This allows processing 10k+ rows without Excel becoming unresponsive
+    '
+    ' Parameters:
+    '   ws - Worksheet with DataCollection column structure
+    '   batchSize - Number of rows per batch (default 500)
+    '
+    ' Column structure expected:
+    '   A: Spot_Date, B: Premium, D: Maturity, E: Interest_Rate
+    '   F: Spot, G: Strike, H: Type (C/P)
+    '   I-N: Primary Greeks (IV, Delta, Vega, Gamma, Theta, Rho)
+    '   V-AB: Second-order Greeks
+
+    Dim lastRow As Long
+    Dim batchStart As Long
+    Dim batchEnd As Long
+    Dim totalRows As Long
+    Dim processedRows As Long
+    Dim calcMode As XlCalculation
+
+    On Error GoTo ErrorHandler
+
+    ' Find last row with Premium data (column B)
+    lastRow = ws.Cells(ws.Rows.count, 2).End(xlUp).Row
+    If lastRow < 2 Then
+        MsgBox "No data found in column B (Premium).", vbExclamation
+        Exit Sub
+    End If
+
+    totalRows = lastRow - 1  ' Exclude header
+    processedRows = 0
+
+    ' Store and set calculation mode
+    calcMode = Application.Calculation
+    Application.Calculation = xlCalculationManual
+    Application.ScreenUpdating = False
+
+    ' Process in batches
+    batchStart = 2  ' Start after header
+
+    Do While batchStart <= lastRow
+        batchEnd = Application.Min(batchStart + batchSize - 1, lastRow)
+
+        ' Update status
+        Application.StatusBar = "Processing rows " & batchStart & " to " & batchEnd & _
+                               " of " & lastRow & " (" & _
+                               Format(processedRows / totalRows, "0%") & ")"
+
+        ' Add formulas to Greek columns (I-N, V-AB)
+        AddGreekFormulasToRange ws, batchStart, batchEnd
+
+        ' Calculate the batch
+        ws.Calculate
+
+        ' Convert formulas to values
+        ConvertGreekFormulasToValues ws, batchStart, batchEnd
+
+        ' Update counters
+        processedRows = processedRows + (batchEnd - batchStart + 1)
+        batchStart = batchEnd + 1
+
+        DoEvents  ' Keep Excel responsive
+    Loop
+
+    ' Cleanup
+    Application.Calculation = calcMode
+    Application.ScreenUpdating = True
+    Application.StatusBar = False
+
+    MsgBox "Greek formulas processed successfully!" & vbNewLine & _
+           "Rows processed: " & totalRows & vbNewLine & _
+           "Worksheet: " & ws.Name, vbInformation
+    Exit Sub
+
+ErrorHandler:
+    Application.Calculation = calcMode
+    Application.ScreenUpdating = True
+    Application.StatusBar = False
+    MsgBox "Error in AddGreekFormulasBatch: " & Err.Description, vbCritical
+End Sub
+
+Private Sub AddGreekFormulasToRange(ws As Worksheet, startRow As Long, endRow As Long)
+    ' Add Greek formulas using FormulaR1C1 for efficiency
+    ' Columns: I=IV, J=Delta, K=Vega, L=Gamma, M=Theta, N=Rho
+    '          V-AB = Second-order Greeks
+    '
+    ' Formula references (R1C1 notation):
+    '   RC1 = Spot_Date (A), RC2 = Premium (B), RC4 = Maturity (D)
+    '   RC5 = Interest_Rate (E), RC6 = Spot (F), RC7 = Strike (G), RC8 = Type (H)
+    '   RC9 = Implied_Volatility (I)
+
+    Dim rng As Range
+
+    ' Column I (9): Implied Volatility
+    Set rng = ws.Range(ws.Cells(startRow, 9), ws.Cells(endRow, 9))
+    rng.FormulaR1C1 = "=IF(OR(RC2="""",ISERROR(RC2)),""""," & _
+        "IFERROR(GBlackScholesImpVolBisection(RC8,RC6,RC7,(RC4-RC1)/365,RC5,0,RC2),""NA""))"
+
+    ' Column J (10): Delta
+    Set rng = ws.Range(ws.Cells(startRow, 10), ws.Cells(endRow, 10))
+    rng.FormulaR1C1 = "=IF(OR(RC[-1]="""",RC[-1]=""NA""),""""," & _
+        "IFERROR(GBlackScholesNGreeks(""d"",RC8,RC6,RC7,(RC4-RC1)/365,RC5,0,RC[-1]),""NA""))"
+
+    ' Column K (11): Vega
+    Set rng = ws.Range(ws.Cells(startRow, 11), ws.Cells(endRow, 11))
+    rng.FormulaR1C1 = "=IF(OR(RC[-2]="""",RC[-2]=""NA""),""""," & _
+        "IFERROR(GBlackScholesNGreeks(""v"",RC8,RC6,RC7,(RC4-RC1)/365,RC5,0,RC[-2]),""NA""))"
+
+    ' Column L (12): Gamma
+    Set rng = ws.Range(ws.Cells(startRow, 12), ws.Cells(endRow, 12))
+    rng.FormulaR1C1 = "=IF(OR(RC[-3]="""",RC[-3]=""NA""),""""," & _
+        "IFERROR(GBlackScholesNGreeks(""g"",RC8,RC6,RC7,(RC4-RC1)/365,RC5,0,RC[-3]),""NA""))"
+
+    ' Column M (13): Theta
+    Set rng = ws.Range(ws.Cells(startRow, 13), ws.Cells(endRow, 13))
+    rng.FormulaR1C1 = "=IF(OR(RC[-4]="""",RC[-4]=""NA""),""""," & _
+        "IFERROR(GBlackScholesNGreeks(""t"",RC8,RC6,RC7,(RC4-RC1)/365,RC5,0,RC[-4]),""NA""))"
+
+    ' Column N (14): Rho
+    Set rng = ws.Range(ws.Cells(startRow, 14), ws.Cells(endRow, 14))
+    rng.FormulaR1C1 = "=IF(OR(RC[-5]="""",RC[-5]=""NA""),""""," & _
+        "IFERROR(GBlackScholesNGreeks(""r"",RC8,RC6,RC7,(RC4-RC1)/365,RC5,0,RC[-5]),""NA""))"
+
+    ' Second-order Greeks (U-AB) use CGBlackScholes - matches Staging sheet structure
+    ' Column U (21): DDeltaDVol (Vanna)
+    Set rng = ws.Range(ws.Cells(startRow, 21), ws.Cells(endRow, 21))
+    rng.FormulaR1C1 = "=IF(OR(RC9="""",RC9=""NA""),""""," & _
+        "IFERROR(CGBlackScholes(""dddv"",RC8,RC6,RC7,(RC4-RC1)/365,RC5,0,RC9),""NA""))"
+
+    ' Column V (22): DDeltaDVolDVol
+    Set rng = ws.Range(ws.Cells(startRow, 22), ws.Cells(endRow, 22))
+    rng.FormulaR1C1 = "=IF(OR(RC9="""",RC9=""NA""),""""," & _
+        "IFERROR(CGBlackScholes(""dvv"",RC8,RC6,RC7,(RC4-RC1)/365,RC5,0,RC9),""NA""))"
+
+    ' Column W (23): DDeltaDTime (Charm)
+    Set rng = ws.Range(ws.Cells(startRow, 23), ws.Cells(endRow, 23))
+    rng.FormulaR1C1 = "=IF(OR(RC9="""",RC9=""NA""),""""," & _
+        "IFERROR(CGBlackScholes(""dt"",RC8,RC6,RC7,(RC4-RC1)/365,RC5,0,RC9),""NA""))"
+
+    ' Column X (24): DGammaDSpot
+    Set rng = ws.Range(ws.Cells(startRow, 24), ws.Cells(endRow, 24))
+    rng.FormulaR1C1 = "=IF(OR(RC9="""",RC9=""NA""),""""," & _
+        "IFERROR(CGBlackScholes(""gps"",RC8,RC6,RC7,(RC4-RC1)/365,RC5,0,RC9),""NA""))"
+
+    ' Column Y (25): DGammaDVol (Zomma)
+    Set rng = ws.Range(ws.Cells(startRow, 25), ws.Cells(endRow, 25))
+    rng.FormulaR1C1 = "=IF(OR(RC9="""",RC9=""NA""),""""," & _
+        "IFERROR(CGBlackScholes(""gpv"",RC8,RC6,RC7,(RC4-RC1)/365,RC5,0,RC9),""NA""))"
+
+    ' Column Z (26): DVegaDVol (Vomma)
+    Set rng = ws.Range(ws.Cells(startRow, 26), ws.Cells(endRow, 26))
+    rng.FormulaR1C1 = "=IF(OR(RC9="""",RC9=""NA""),""""," & _
+        "IFERROR(CGBlackScholes(""dvdv"",RC8,RC6,RC7,(RC4-RC1)/365,RC5,0,RC9),""NA""))"
+
+    ' Column AA (27): DVegaDVolDVol (Ultima)
+    Set rng = ws.Range(ws.Cells(startRow, 27), ws.Cells(endRow, 27))
+    rng.FormulaR1C1 = "=IF(OR(RC9="""",RC9=""NA""),""""," & _
+        "IFERROR(CGBlackScholes(""vvv"",RC8,RC6,RC7,(RC4-RC1)/365,RC5,0,RC9),""NA""))"
+End Sub
+
+Private Sub ConvertGreekFormulasToValues(ws As Worksheet, startRow As Long, endRow As Long)
+    ' Convert formula columns to values (removes formulas, keeps calculated results)
+    ' This is faster than Copy/PasteSpecial and doesn't use clipboard
+    Dim rng As Range
+
+    ' Primary Greeks (I:N = columns 9-14)
+    Set rng = ws.Range(ws.Cells(startRow, 9), ws.Cells(endRow, 14))
+    rng.Value = rng.Value
+
+    ' Second-order Greeks (U:AA = columns 21-27)
+    Set rng = ws.Range(ws.Cells(startRow, 21), ws.Cells(endRow, 27))
+    rng.Value = rng.Value
+End Sub
 
 
-
-
+' RunAddGreekFormulasBatch()
