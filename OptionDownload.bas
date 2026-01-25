@@ -64,6 +64,8 @@ Public Const RANGE_RFR As String = "RFR"
 
 ' Data Limits
 Public Const MAX_UNDERLYING_ROWS As Long = 10000  ' Maximum rows for underlying price data and VLOOKUP ranges
+Public Const ROW_SPACING As Long = 3000  ' Spacing between formulas in DataCollection sheet
+Public Const ENABLE_RETRY_ON_FAILURE As Boolean = False  ' Set to True to retry failed downloads with alternate RIC format
 
 ' Types
 Type BatchInfo
@@ -279,8 +281,21 @@ Sub RefreshFutureUnderlyings()
 
     ' Step 4: Clear existing underlying data
     Application.StatusBar = "Clearing existing underlying data..."
-    ' Calculate end column (each underlying uses 3 columns, clear up to 100 columns as reasonable limit)
-    clearEndCol = startCol + 99
+    ' Find the last used column by scanning for empty blocks
+    clearEndCol = startCol
+    Dim scanCol As Long
+    scanCol = startCol
+    Do While True
+        If wsFuture.Cells(startRow, scanCol).Value <> "" Then
+            clearEndCol = scanCol + 2  ' Include all 3 columns of this block
+        End If
+        scanCol = scanCol + 3
+        ' Stop if we find 2 consecutive empty blocks
+        If wsFuture.Cells(startRow, scanCol).Value = "" And _
+           wsFuture.Cells(startRow, scanCol + 3).Value = "" Then
+            Exit Do
+        End If
+    Loop
 
     ' Clear the data area - clear up to MAX_UNDERLYING_ROWS from startRow (not entire sheet)
     ' This prevents accidentally clearing formulas/data far below the expected range
@@ -593,7 +608,6 @@ Sub ProcessBatch_SetupFormulas()
     Dim i As Long
     Dim ric As String
     Dim currentRow As Long
-    Const ROW_SPACING As Long = 300
 
     ' Check stop flag
     If g_StopRequested Then
@@ -715,7 +729,6 @@ Sub ProcessBatch_ProcessResults()
     Dim wsCollection As Worksheet
     Dim i As Long
     Dim processRow As Long
-    Const ROW_SPACING As Long = 300
 
     ' Check stop flag
     If g_StopRequested Then
@@ -753,8 +766,10 @@ Sub ProcessBatch_ProcessResults()
     ValidateAndUpdateRICListWithSpacing wsCollection, g_FormulaCount
 
     ' Retry failed RICs with alternate format (toggle expired suffix)
-    Application.StatusBar = "Batch #" & g_BatchCounter & ": Retrying failed RICs..."
-    RetryFailedRICsInBatch wsCollection, g_BatchStartRow, g_BatchEndRow
+    If ENABLE_RETRY_ON_FAILURE Then
+        Application.StatusBar = "Batch #" & g_BatchCounter & ": Retrying failed RICs..."
+        RetryFailedRICsInBatch wsCollection, g_BatchStartRow, g_BatchEndRow
+    End If
 
     'Application.StatusBar = "Batch #" & g_BatchCounter & ": Final calculations..."
     'Application.Calculate
@@ -837,7 +852,6 @@ Function IsDataReady(ws As Worksheet, Optional ByRef outReadyCount As Long, Opti
     Dim i As Long
     Dim samplePositions() As Long
     Dim maxSamples As Long
-    Const ROW_SPACING As Long = 300
 
     totalChecks = 0
     readyCount = 0
@@ -927,7 +941,7 @@ Function FindUnderlyingColumn(underlyingTicker As String) As Long
     If startCol > 0 And startRow > 0 Then
         ' Scan columns in steps of 3 (each underlying uses 3 columns)
         currentCol = startCol
-        Do While currentCol <= startCol + 100  ' Reasonable upper limit
+        Do While True
             foundUnderlying = Trim(CStr(wsFuture.Cells(startRow, currentCol).Value))
 
             If foundUnderlying = underlyingTicker Then
@@ -1248,8 +1262,7 @@ Sub ValidateAndUpdateRICListWithSpacing(wsCollection As Worksheet, formulaCount 
     Dim lastPremium As Double
     Dim lastIV As Double
     Dim dataFound As Boolean
-    Const ROW_SPACING As Long = 300
-    
+
     Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
 
     ' Force recalculation to ensure all values are populated
@@ -1507,7 +1520,7 @@ Function CheckUnderlyingsHaveData(ByRef missingList As String) As Boolean
 
         ' Search for underlying in Future et co (every 3rd column)
         currentCol = startCol
-        Do While currentCol <= startCol + 100
+        Do While True
             foundUnderlying = Trim(CStr(wsFuture.Cells(startRow, currentCol).Value))
 
             If foundUnderlying = CStr(underlying) Then
@@ -1937,7 +1950,6 @@ Sub RetryFailedRICsInBatch(wsCollection As Worksheet, batchStartRow As Long, bat
     Dim yearCode As String
     Dim monthCodeCall As String
     Dim formulaRow As Long
-    Const ROW_SPACING As Long = 300
 
     Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
 
@@ -2230,7 +2242,7 @@ Function GetSpotPrice(underlyingTicker As String) As Double
     ' Scan for the underlying ticker (every 3rd column, same pattern as RefreshFutureUnderlyings)
     currentCol = startCol
 
-    While currentCol <= startCol + 100 ' Reasonable upper limit
+    Do While True
         foundUnderlying = Trim(CStr(wsFuture.Cells(startRow, currentCol).Value))
 
         If foundUnderlying = underlyingTicker Then
@@ -2260,8 +2272,9 @@ Function GetSpotPrice(underlyingTicker As String) As Double
         If wsFuture.Cells(startRow, currentCol).Value = "" And _
            wsFuture.Cells(startRow, currentCol + 3).Value = "" And _
            wsFuture.Cells(startRow, currentCol + 6).Value = "" Then
+            Exit Do
         End If
-    Wend
+    Loop
 
     ' If we reach here, underlying not found or no valid price - return 0
     GetSpotPrice = 0
@@ -2503,7 +2516,7 @@ Function CheckUnderlyings() As Boolean
     Application.StatusBar = "Scanning SHEET_FUTURE for existing underlyings..."
     currentCol = startCol
 
-    While currentCol <= startCol + 100 ' Reasonable upper limit
+    Do While True
         foundUnderlying = Trim(CStr(wsFuture.Cells(rowDownload, currentCol).Value))   ' Metadata column
 
         If foundUnderlying <> "" Then
@@ -2513,11 +2526,12 @@ Function CheckUnderlyings() As Boolean
         currentCol = currentCol + 3  ' Move to next 3-column block
 
         ' Break if we find 3 consecutive empty blocks
-        If wsFuture.Cells(2, currentCol).Value = "" And _
-           wsFuture.Cells(2, currentCol + 3).Value = "" And _
-           wsFuture.Cells(2, currentCol + 6).Value = "" Then
+        If wsFuture.Cells(rowDownload, currentCol).Value = "" And _
+           wsFuture.Cells(rowDownload, currentCol + 3).Value = "" And _
+           wsFuture.Cells(rowDownload, currentCol + 6).Value = "" Then
+            Exit Do
         End If
-    Wend
+    Loop
 
     ' Step 4: Compare and identify missing underlyings
     Dim underlying As Variant
