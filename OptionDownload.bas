@@ -64,7 +64,7 @@ Public Const RANGE_RFR As String = "RFR"
 
 ' Data Limits
 Public Const MAX_UNDERLYING_ROWS As Long = 10000  ' Maximum rows for underlying price data and VLOOKUP ranges
-Public Const ROW_SPACING As Long = 3000  ' Spacing between formulas in DataCollection sheet
+Public Const ROW_SPACING As Long = 1000  ' Spacing between formulas in DataCollection sheet
 Public Const ENABLE_RETRY_ON_FAILURE As Boolean = False  ' Set to True to retry failed downloads with alternate RIC format
 
 ' Types
@@ -645,19 +645,13 @@ Sub ProcessBatch_SetupFormulas()
         ' Setup formula
         wsCollection.Cells(currentRow, 1).Formula = BuildRHistoryFormula(ric, g_DateStart, g_DateEnd)
 
-        ' Store metadata
-        wsCollection.Cells(currentRow, 7).Value = wsRIC.Cells(i, 3).Value
-        wsCollection.Cells(currentRow, 8).Value = Left(wsRIC.Cells(i, 4).Value, 1)
-        wsCollection.Cells(currentRow, 4).Value = wsRIC.Cells(i, 2).Value
-        wsCollection.Cells(currentRow, 15).Value = i
-        wsCollection.Cells(currentRow, 16).Value = ric
-
-        ' Setup metadata only (Greek formulas added after refresh)
-        SetupRHistoryAndMetadata wsCollection, currentRow, ROW_SPACING, _
-                                 wsRIC.Cells(i, 3).Value, _
-                                 wsRIC.Cells(i, 4).Value, _
-                                 wsRIC.Cells(i, 2).Value, _
-                                 i, wsRIC.Cells(i, 7).Value, ric
+        ' Setup MINIMAL anchor metadata only (full metadata deferred to Phase 3 after LSEG refresh)
+        ' This avoids setting up 1000 rows of metadata for RICs that may return no data
+        SetupMinimalAnchorMetadata wsCollection, currentRow, _
+                                   wsRIC.Cells(i, 3).Value, _
+                                   wsRIC.Cells(i, 4).Value, _
+                                   wsRIC.Cells(i, 2).Value, _
+                                   i, wsRIC.Cells(i, 7).Value, ric
 
         g_FormulaCount = g_FormulaCount + 1
 
@@ -739,7 +733,14 @@ Sub ProcessBatch_ProcessResults()
     g_BatchState = bpsProcessingResults
     Set wsCollection = ThisWorkbook.Worksheets(SHEET_COLLECTION)
 
-    ' Add Greek formulas to rows with data (after LSEG refresh)
+    ' Setup metadata and Greek formulas ONLY for rows with actual LSEG data
+    ' This is the optimized "lazy initialization" approach - metadata was deferred from Phase 1
+    Application.StatusBar = "Batch #" & g_BatchCounter & ": Setting up metadata for data rows..."
+    For i = 0 To g_FormulaCount - 1
+        processRow = 2 + (i * ROW_SPACING)
+        SetupMetadataForDataRows wsCollection, processRow, ROW_SPACING
+    Next i
+
     Application.StatusBar = "Batch #" & g_BatchCounter & ": Adding Greek formulas to data rows..."
     For i = 0 To g_FormulaCount - 1
         processRow = 2 + (i * ROW_SPACING)
@@ -989,8 +990,28 @@ Function BuildSpotVLOOKUPFormula(rowNum As Long, underlyingTicker As String) As 
     End If
 End Function
 
-' New optimized approach: Setup minimal metadata before LSEG refresh
-Sub SetupRHistoryAndMetadata(ws As Worksheet, startRow As Long, maxRows As Long, _
+' ============================================
+' OPTIMIZED: Setup minimal metadata at anchor row only (before LSEG refresh)
+' Full metadata is deferred to SetupMetadataForDataRows after LSEG returns data
+' ============================================
+Sub SetupMinimalAnchorMetadata(ws As Worksheet, startRow As Long, _
+                               strike As Double, optType As String, maturity As Date, _
+                               ricRowRef As Long, underlyingTicker As String, optionRic As String)
+    ' Store ONLY what's needed to process this block later
+    ' These values are read by SetupMetadataForDataRows after LSEG refresh
+    ws.Cells(startRow, 15).Value = ricRowRef         ' RIC_Row_Ref - needed for validation
+    ws.Cells(startRow, 16).Value = optionRic         ' RIC - needed for tracking
+    ws.Cells(startRow, 7).Value = strike             ' Strike - temp storage for deferred setup
+    ws.Cells(startRow, 8).Value = Left(optType, 1)   ' Type - temp storage
+    ws.Cells(startRow, 4).Value = maturity           ' Maturity - temp storage
+    ws.Cells(startRow, 29).Value = underlyingTicker  ' Underlying - temp storage
+End Sub
+
+' ============================================
+' LEGACY: Original function that sets up ALL rows before knowing if data exists
+' Kept for reference/rollback - not used in optimized flow
+' ============================================
+Sub SetupRHistoryAndMetadata_LEGACY(ws As Worksheet, startRow As Long, maxRows As Long, _
                              strike As Double, optType As String, maturity As Date, ricRowRef As Long, underlyingTicker As String, optionRic As String)
     Dim i As Long
     Dim endRow As Long
@@ -1179,6 +1200,154 @@ CleanUp:
     'Application.ScreenUpdating = True
     Application.Calculation = originalCalcMode
     'Application.EnableEvents = True
+End Sub
+
+' ============================================
+' OPTIMIZED: Setup metadata ONLY for rows with actual LSEG data (after refresh)
+' Follows the same lazy initialization pattern as AddGreekFormulasToDataRows
+' ============================================
+Sub SetupMetadataForDataRows(ws As Worksheet, startRow As Long, maxRows As Long)
+    Dim i As Long
+    Dim endRow As Long
+    Dim firstDataRow As Long
+    Dim lastDataRow As Long
+    Dim wsFuture As Worksheet
+    Dim underlyingCol As Long
+    Dim rfrRange As Range
+    Dim rfrRow As Long
+    Dim rfrCol As Long
+    Dim rfrLastRow As Long
+    Dim spotFormula As String
+    Dim optFreq As String
+    Dim weekNum As Integer
+    Dim optionBloomTicker As String
+    Dim underlyingBloomTicker As String
+    Dim originalCalcMode As XlCalculation
+
+    ' Read anchor row values (stored by SetupMinimalAnchorMetadata)
+    Dim strike As Double
+    Dim optType As String
+    Dim maturity As Date
+    Dim ricRowRef As Long
+    Dim underlyingTicker As String
+    Dim optionRic As String
+
+    ' Save original calculation mode and disable for speed
+    originalCalcMode = Application.Calculation
+    Application.Calculation = xlCalculationManual
+
+    On Error GoTo CleanUp
+
+    endRow = startRow + maxRows - 1
+    firstDataRow = 0
+    lastDataRow = 0
+
+    ' Find first and last rows with actual LSEG data (same pattern as AddGreekFormulasToDataRows)
+    For i = startRow To endRow
+        If Not IsEmpty(ws.Cells(i, 1).Value) And Not IsError(ws.Cells(i, 1).Value) And _
+           Not IsEmpty(ws.Cells(i, 2).Value) And Not IsError(ws.Cells(i, 2).Value) Then
+            If firstDataRow = 0 Then firstDataRow = i
+            lastDataRow = i
+        ElseIf firstDataRow > 0 Then
+            Exit For ' No more data
+        End If
+    Next i
+
+    ' Exit if no data found - nothing to set up
+    If firstDataRow = 0 Or lastDataRow = 0 Then GoTo CleanUp
+
+    ' Read anchor row metadata (stored by SetupMinimalAnchorMetadata)
+    strike = ws.Cells(startRow, 7).Value
+    optType = ws.Cells(startRow, 8).Value
+    maturity = ws.Cells(startRow, 4).Value
+    ricRowRef = ws.Cells(startRow, 15).Value
+    optionRic = ws.Cells(startRow, 16).Value
+    underlyingTicker = ws.Cells(startRow, 29).Value
+
+    ' Setup references for VLOOKUP formulas
+    Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
+    underlyingCol = FindUnderlyingColumn(underlyingTicker)
+
+    ' Get RFR range position
+    On Error Resume Next
+    Set rfrRange = wsFuture.Range(RANGE_RFR)
+    On Error GoTo CleanUp
+
+    If Not rfrRange Is Nothing Then
+        rfrRow = rfrRange.Row
+        rfrCol = rfrRange.Column
+        rfrLastRow = wsFuture.Cells(wsFuture.Rows.count, 1).End(xlUp).Row
+    End If
+
+    ' Get option frequency and build Bloomberg ticker
+    optFreq = GetOptionFrequency()
+    underlyingBloomTicker = GetBloombergTicker(underlyingTicker, ricRowRef)
+
+    If optFreq = "weekly" Then
+        weekNum = GetWeekNumberFromDate(maturity)
+        optionBloomTicker = BuildWeeklyOptionBloombergTicker(underlyingBloomTicker, optType, strike, weekNum)
+    Else
+        optionBloomTicker = BuildOptionBloombergTicker(underlyingBloomTicker, optType, strike)
+    End If
+
+    ' Setup metadata ONLY for rows with actual data (firstDataRow to lastDataRow)
+    For i = firstDataRow To lastDataRow
+        ' Column C (3): Option Bloomberg ticker
+        ws.Cells(i, 3).Value = optionBloomTicker
+
+        ' Column D (4): Maturity
+        ws.Cells(i, 4).Value = maturity
+
+        ' Column E (5): Interest_rate - VLOOKUP from RFR range
+        If Not rfrRange Is Nothing Then
+            ws.Cells(i, 5).Formula = "=IFERROR(VLOOKUP(A" & i & ",'" & SHEET_FUTURE & "'!" & _
+                wsFuture.Range(wsFuture.Cells(rfrRow, 1), wsFuture.Cells(rfrLastRow, rfrCol)).Address(False, False) & _
+                "," & rfrCol & ",TRUE),""not found"")"
+        Else
+            ws.Cells(i, 5).Value = "not found"
+        End If
+
+        ' Column F (6): Spot - VLOOKUP from underlying data
+        spotFormula = BuildSpotVLOOKUPFormula(i, underlyingTicker)
+        If spotFormula <> "" Then
+            ws.Cells(i, 6).Formula = spotFormula
+        Else
+            ws.Cells(i, 6).Value = GetSpotPrice(underlyingTicker)
+        End If
+
+        ' Column G (7): Strike
+        ws.Cells(i, 7).Value = strike
+
+        ' Column H (8): Type
+        ws.Cells(i, 8).Value = Left(optType, 1)
+
+        ' Column O (15): RIC row reference
+        ws.Cells(i, 15).Value = ricRowRef
+
+        ' Column P (16): Option RIC
+        ws.Cells(i, 16).Value = optionRic
+
+        ' Column Q (17): Lot size
+        ws.Cells(i, 17).Value = g_LotSize
+
+        ' Column R (18): Name
+        ws.Cells(i, 18).Value = g_NamePrefix & " " & Left(optType, 1) & " " & strike & " " & Format(maturity, "mmm-yyyy")
+
+        ' Column S (19): Underlying Bloomberg ticker
+        ws.Cells(i, 19).Value = underlyingBloomTicker
+
+        ' Column T (20): Currency
+        ws.Cells(i, 20).Value = g_Currency
+
+        ' Column U (21): Placeholder (0)
+        ws.Cells(i, 21).Value = 0
+
+        ' Column AC (29): Underlying RIC
+        ws.Cells(i, 29).Value = underlyingTicker
+    Next i
+
+CleanUp:
+    Application.Calculation = originalCalcMode
 End Sub
 
 ' New function to copy only rows with LSEG data to staging
