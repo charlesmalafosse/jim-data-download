@@ -778,8 +778,8 @@ Sub ProcessBatch_ProcessResults()
     Application.StatusBar = "Batch #" & g_BatchCounter & ": Saving to CSV..."
     SaveStagingToCSV GetBatchNumberFromRow(g_BatchStartRow)
 
-    ' Save workbook every 3 batches
-    If g_BatchCounter Mod 3 = 0 Then
+    ' Save workbook every 5 batches
+    If g_BatchCounter Mod 5 = 0 Then
         Application.StatusBar = "Saving workbook (batch " & g_BatchCounter & ")..."
         ThisWorkbook.Save
     End If
@@ -1816,17 +1816,17 @@ Function CountUnprocessedRICs() As Long
     Dim lastRow As Long
     Dim i As Long
     Dim count As Long
-    
+
     Set ws = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
     lastRow = ws.Cells(ws.Rows.count, "A").End(xlUp).Row
-    
+
     count = 0
     For i = 2 To lastRow
-        If ws.Cells(i, 9).Value <> "Yes" Then  ' Column I: Processed
+        If ws.Cells(i, 9).Value = "No" Then  ' Column I: Processed - only count explicit "No"
             count = count + 1
         End If
     Next i
-    
+
     CountUnprocessedRICs = count
 End Function
 
@@ -2831,30 +2831,159 @@ Function CheckUnderlyings() As Boolean
     CheckUnderlyings = (missingUnderlyings.count = 0)
 End Function
 
+' ============================================
+' CSV EXPORT HELPER FUNCTIONS (High Performance)
+' ============================================
+
+' Format a single field for CSV output with proper escaping
+Private Function FormatCSVField(val As Variant) As String
+    Dim s As String
+
+    If IsError(val) Then
+        FormatCSVField = ""
+    ElseIf IsEmpty(val) Or IsNull(val) Then
+        FormatCSVField = ""
+    ElseIf IsDate(val) Then
+        FormatCSVField = Format(val, "yyyy-mm-dd hh:mm:ss")
+    Else
+        s = CStr(val)
+        ' Escape fields containing comma, quote, or newline
+        If InStr(s, ",") > 0 Or InStr(s, """") > 0 Or InStr(s, vbCr) > 0 Or InStr(s, vbLf) > 0 Then
+            s = Replace(s, """", """""")  ' Double up any quotes
+            s = """" & s & """"           ' Wrap in quotes
+        End If
+        FormatCSVField = s
+    End If
+End Function
+
+' Write a 2D array to CSV file using VBA file I/O (much faster than Excel SaveAs)
+Private Sub WriteArrayToCSV(data As Variant, filePath As String, Optional headers As Variant)
+    Dim fileNum As Integer
+    Dim i As Long, j As Long
+    Dim rowStr As String
+    Dim colCount As Long
+    Dim rowCount As Long
+    Dim fieldVal As String
+
+    fileNum = FreeFile
+    Open filePath For Output As #fileNum
+
+    ' Write headers if provided
+    If Not IsMissing(headers) Then
+        If IsArray(headers) Then
+            colCount = UBound(headers, 2)
+            rowStr = ""
+            For j = 1 To colCount
+                If j > 1 Then rowStr = rowStr & ","
+                rowStr = rowStr & FormatCSVField(headers(1, j))
+            Next j
+            Print #fileNum, rowStr
+        End If
+    End If
+
+    ' Handle case where data might be a single value (1 row, 1 col)
+    If Not IsArray(data) Then
+        Print #fileNum, FormatCSVField(data)
+        Close #fileNum
+        Exit Sub
+    End If
+
+    ' Write data rows
+    rowCount = UBound(data, 1)
+    colCount = UBound(data, 2)
+
+    For i = 1 To rowCount
+        rowStr = ""
+        For j = 1 To colCount
+            If j > 1 Then rowStr = rowStr & ","
+            rowStr = rowStr & FormatCSVField(data(i, j))
+        Next j
+        Print #fileNum, rowStr
+    Next i
+
+    Close #fileNum
+End Sub
+
+' ============================================
+' CSV EXPORT FUNCTIONS
+' ============================================
+
+' Manual CSV export - run from Excel Macros menu or assign to a button
+' Creates a clean final export with simple filename (rootric_yyyymm.csv)
+' Shows completion message with row count and export time
+' For automatic batch saves during processing, see SaveStagingToCSV below
 Sub ExportToCSV()
     Dim stagingWs As Worksheet
     Dim csvPath As String
     Dim fileName As String
+    Dim rowCount As Long
+    Dim colCount As Long
+    Dim data As Variant
+    Dim headers As Variant
+    Dim startTime As Double
+
+    On Error GoTo ErrorHandler
 
     Set stagingWs = ThisWorkbook.Worksheets(SHEET_STAGING)
 
+    ' Check if staging has data
+    rowCount = stagingWs.Cells(stagingWs.Rows.count, 1).End(xlUp).Row
+    If rowCount <= 1 Then
+        MsgBox "No data to export.", vbExclamation
+        Exit Sub
+    End If
+
+    colCount = stagingWs.Cells(1, stagingWs.Columns.count).End(xlToLeft).Column
+
+    ' Disable Excel features for speed
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+    Application.EnableEvents = False
+
+    startTime = Timer
+
+    ' Read all data into arrays (single operation - very fast)
+    headers = stagingWs.Range(stagingWs.Cells(1, 1), stagingWs.Cells(1, colCount)).Value
+    data = stagingWs.Range(stagingWs.Cells(2, 1), stagingWs.Cells(rowCount, colCount)).Value
+
+    ' Build filename
     fileName = g_RootRIC & "_" & Format(Date, "yyyymm") & ".csv"
     csvPath = ThisWorkbook.Path & "\" & fileName
 
-    stagingWs.Copy
+    ' Write to CSV using fast file I/O
+    WriteArrayToCSV data, csvPath, headers
 
-    ActiveWorkbook.SaveAs fileName:=csvPath, FileFormat:=xlCSV
-    ActiveWorkbook.Close False
+    ' Re-enable Excel features
+    Application.ScreenUpdating = True
+    Application.Calculation = xlCalculationAutomatic
+    Application.EnableEvents = True
 
-    MsgBox "Data exported to: " & csvPath, vbInformation
+    MsgBox "Data exported to: " & csvPath & vbNewLine & _
+           "Rows: " & (rowCount - 1) & vbNewLine & _
+           "Time: " & Format(Timer - startTime, "0.00") & " seconds", vbInformation
+
+    Exit Sub
+
+ErrorHandler:
+    Application.ScreenUpdating = True
+    Application.Calculation = xlCalculationAutomatic
+    Application.EnableEvents = True
+    MsgBox "Error exporting CSV: " & Err.Description, vbCritical
 End Sub
 
 ' Auto-save staging to CSV after each batch (silent, no popup)
+' Uses fast VBA file I/O instead of slow Excel SaveAs
 Sub SaveStagingToCSV(Optional batchNumber As Long = 0)
     Dim stagingWs As Worksheet
     Dim csvPath As String
     Dim fileName As String
     Dim rowCount As Long
+    Dim colCount As Long
+    Dim data As Variant
+    Dim headers As Variant
+    Dim prevScreenUpdating As Boolean
+    Dim prevCalculation As XlCalculation
+    Dim prevEnableEvents As Boolean
 
     On Error GoTo ErrorHandler
 
@@ -2863,6 +2992,22 @@ Sub SaveStagingToCSV(Optional batchNumber As Long = 0)
     ' Check if staging has data (more than just header row)
     rowCount = stagingWs.Cells(stagingWs.Rows.count, 1).End(xlUp).Row
     If rowCount <= 1 Then Exit Sub
+
+    colCount = stagingWs.Cells(1, stagingWs.Columns.count).End(xlToLeft).Column
+
+    ' Save current Excel state
+    prevScreenUpdating = Application.ScreenUpdating
+    prevCalculation = Application.Calculation
+    prevEnableEvents = Application.EnableEvents
+
+    ' Disable Excel features for speed
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+    Application.EnableEvents = False
+
+    ' Read all data into arrays (single operation - very fast)
+    headers = stagingWs.Range(stagingWs.Cells(1, 1), stagingWs.Cells(1, colCount)).Value
+    data = stagingWs.Range(stagingWs.Cells(2, 1), stagingWs.Cells(rowCount, colCount)).Value
 
     ' Build filename with batch number if provided
     If batchNumber > 0 Then
@@ -2873,12 +3018,13 @@ Sub SaveStagingToCSV(Optional batchNumber As Long = 0)
 
     csvPath = ThisWorkbook.Path & "\" & fileName
 
-    ' Save without prompts
-    Application.DisplayAlerts = False
-    stagingWs.Copy
-    ActiveWorkbook.SaveAs fileName:=csvPath, FileFormat:=xlCSV
-    ActiveWorkbook.Close False
-    Application.DisplayAlerts = True
+    ' Write to CSV using fast file I/O
+    WriteArrayToCSV data, csvPath, headers
+
+    ' Restore Excel state
+    Application.ScreenUpdating = prevScreenUpdating
+    Application.Calculation = prevCalculation
+    Application.EnableEvents = prevEnableEvents
 
     ' Log to status bar instead of popup
     Application.StatusBar = "Auto-saved: " & fileName & " (" & rowCount - 1 & " rows)"
@@ -2886,7 +3032,10 @@ Sub SaveStagingToCSV(Optional batchNumber As Long = 0)
     Exit Sub
 
 ErrorHandler:
-    Application.DisplayAlerts = True
+    ' Restore Excel state on error
+    Application.ScreenUpdating = prevScreenUpdating
+    Application.Calculation = prevCalculation
+    Application.EnableEvents = prevEnableEvents
     Application.StatusBar = "Error saving CSV: " & Err.Description
 End Sub
 
