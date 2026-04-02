@@ -114,6 +114,9 @@ Sub RefreshFutureSheet()
 End Sub
 
 Sub RefreshFutureSheet_CheckReady()
+    ' Guard: ignore stale OnTime callbacks after hard stop
+    If g_FutureSheet Is Nothing Then Exit Sub
+
     Dim readyCount As Long
     Dim totalCount As Long
     Dim elapsed As Double
@@ -146,6 +149,9 @@ Sub RefreshFutureSheet_CheckReady()
 End Sub
 
 Sub RefreshFutureSheet_Complete()
+    ' Guard: ignore stale OnTime callbacks after hard stop
+    If g_FutureSheet Is Nothing Then Exit Sub
+
     g_FutureSheet.Calculate
     DoEvents
 
@@ -217,10 +223,10 @@ Sub RefreshFutureUnderlyings()
         i = i + 1
     Next underlying
 
-    ' Simple bubble sort
+    ' Bubble sort by reversed name (e.g. "CCK7" -> "7KCC") so year sorts first, then month code, then future code
     For i = 1 To arraySize - 1
         For j = i + 1 To arraySize
-            If underlyingsArray(i) > underlyingsArray(j) Then
+            If StrReverse(underlyingsArray(i)) > StrReverse(underlyingsArray(j)) Then
                 temp = underlyingsArray(i)
                 underlyingsArray(i) = underlyingsArray(j)
                 underlyingsArray(j) = temp
@@ -320,14 +326,16 @@ Sub RefreshFutureUnderlyings()
         wsFuture.Cells(headerRow, headerCol).Value = "Date"
         wsFuture.Cells(headerRow, headerCol + 1).Value = "Last Price"
 
-        ' Add the RHistory formula
-        wsFuture.Cells(formulaRow, formulaCol).Formula = _
-            "=RHistory(""" & underlyingsArray(i) & """," & _
-            """.Timestamp;.Close""," & _
-            """NBROWS:5000 INTERVAL:1D"",,""Sort:ASC"")"
-
-        ' Add the underlying symbol in the RANGE_DOWNLOAD row/column
+        ' Add the underlying symbol in the RANGE_DOWNLOAD row/column (before formula so cell ref works)
         wsFuture.Cells(startRow, currentCol).Value = underlyingsArray(i)
+
+        ' Add the RHistory formula referencing the header cell for the RIC and named ranges for dates
+        Dim ricCellRef As String
+        ricCellRef = wsFuture.Cells(startRow, currentCol).Address(False, False)
+        wsFuture.Cells(formulaRow, formulaCol).Formula = _
+            "=RHistory(" & ricCellRef & "," & _
+            """.Timestamp;.Close""," & _
+            """START:""&TEXT(" & RANGE_UNDERLYING_START_DATE & ",""YYYY-MM-DD"")&"" END:""&TEXT(" & RANGE_UNDERLYING_END_DATE & ",""YYYY-MM-DD"")&"" INTERVAL:1D"",,""Sort:ASC"")"
 
         ' Add metadata in the next column
         wsFuture.Cells(startRow, currentCol + 1).Value = "Added: " & Format(Now, "yyyy-mm-dd hh:mm")
@@ -360,6 +368,9 @@ ErrorHandler:
 End Sub
 
 Sub RefreshFutureUnderlyings_CheckReady()
+    ' Guard: ignore stale OnTime callbacks after hard stop
+    If g_FutureSheet Is Nothing Then Exit Sub
+
     Dim readyCount As Long
     Dim totalCount As Long
     Dim elapsed As Double
@@ -426,6 +437,9 @@ ErrorHandler:
 End Sub
 
 Sub RefreshFutureUnderlyings_Complete()
+    ' Guard: ignore stale OnTime callbacks after hard stop
+    If g_FutureSheet Is Nothing Then Exit Sub
+
     On Error Resume Next
 
     g_FutureSheet.Calculate
@@ -573,7 +587,15 @@ Sub ProcessAllBatchesFromRICList()
     ' Initialize
     g_BatchCounter = 0
     g_StopRequested = False
-    g_BatchState = bpsIdle
+    g_BatchState = bpsSetupFormulas
+
+    ' Reset any rows stuck in "Processing" from a prior interrupted run
+    Dim resetRow As Long
+    For resetRow = 2 To lastRow
+        If ws.Cells(resetRow, 9).Value = "Processing" Then
+            ws.Cells(resetRow, 9).Value = "No"
+        End If
+    Next resetRow
 
     ' Find first unprocessed batch
     batchStart = FindNextUnprocessedRIC(2)
@@ -603,6 +625,9 @@ End Sub
 ' PHASE 1: Setup Formulas and Trigger Refresh
 ' ============================================
 Sub ProcessBatch_SetupFormulas()
+    ' Guard: ignore stale OnTime callbacks after hard stop
+    If g_BatchState = bpsIdle Then Exit Sub
+
     Dim wsRIC As Worksheet
     Dim wsCollection As Worksheet
     Dim i As Long
@@ -680,6 +705,9 @@ End Sub
 ' PHASE 2: Check if Refresh Complete
 ' ============================================
 Sub ProcessBatch_CheckRefresh()
+    ' Guard: ignore stale OnTime callbacks after hard stop
+    If g_BatchState = bpsIdle Then Exit Sub
+
     Dim wsCollection As Worksheet
     Dim readyCount As Long
     Dim totalChecks As Long
@@ -720,6 +748,9 @@ End Sub
 ' PHASE 3: Process Results
 ' ============================================
 Sub ProcessBatch_ProcessResults()
+    ' Guard: ignore stale OnTime callbacks after hard stop
+    If g_BatchState = bpsIdle Then Exit Sub
+
     Dim wsCollection As Worksheet
     Dim i As Long
     Dim processRow As Long
@@ -757,10 +788,14 @@ Sub ProcessBatch_ProcessResults()
         Application.Wait Now + TimeValue("00:00:01")  ' Wait 1 second
         calcTimeout = calcTimeout + 1
         
-'        If calcTimeout > 30 Then  ' 30 second timeout
-'            MsgBox "Calculation timeout - proceeding anyway", vbExclamation
-'            Exit Do
-'        End If
+       If calcTimeout > 20 Then  ' 20 second timeout
+           If AreGreeksComputed(wsCollection, g_FormulaCount, ROW_SPACING) Then
+               Exit Do  ' Greeks are done, Excel just doesn't know it
+           Else
+               MsgBox "Calculation timeout - Greeks not fully computed, proceeding anyway", vbExclamation
+               Exit Do
+           End If
+       End If
     Loop
 
     Application.StatusBar = "Batch #" & g_BatchCounter & ": Validating and copying data to staging..."
@@ -900,11 +935,44 @@ Function IsDataReady(ws As Worksheet, Optional ByRef outReadyCount As Long, Opti
     IsDataReady = (totalChecks > 0 And readyCount = totalChecks)
 End Function
 
-' Stop batch processing
+' Stop batch processing (graceful - waits for current phase)
 Sub StopBatchProcessing()
     g_StopRequested = True
     Application.StatusBar = "Stop requested - will halt after current operation..."
     MsgBox "Batch processing will stop after current phase completes.", vbInformation
+End Sub
+
+' Emergency stop - cancels ALL pending OnTime callbacks and resets state
+' Use this after a hard stop (Escape + Stop in VBA editor) to prevent ghost execution
+Sub EmergencyStop()
+    On Error Resume Next  ' OnTime errors if no matching call is pending
+
+    ' Cancel batch processing chain callbacks
+    If g_NextScheduledProc <> "" Then
+        Application.OnTime EarliestTime:=Now, Procedure:=g_NextScheduledProc, Schedule:=False
+    End If
+    Application.OnTime EarliestTime:=Now, Procedure:="ProcessBatch_SetupFormulas", Schedule:=False
+    Application.OnTime EarliestTime:=Now, Procedure:="ProcessBatch_CheckRefresh", Schedule:=False
+    Application.OnTime EarliestTime:=Now, Procedure:="ProcessBatch_ProcessResults", Schedule:=False
+
+    ' Cancel future sheet refresh callbacks
+    Application.OnTime EarliestTime:=Now, Procedure:="RefreshFutureSheet_CheckReady", Schedule:=False
+    Application.OnTime EarliestTime:=Now, Procedure:="RefreshFutureSheet_Complete", Schedule:=False
+    Application.OnTime EarliestTime:=Now, Procedure:="RefreshFutureUnderlyings_CheckReady", Schedule:=False
+    Application.OnTime EarliestTime:=Now, Procedure:="RefreshFutureUnderlyings_Complete", Schedule:=False
+
+    On Error GoTo 0
+
+    ' Reset all state
+    g_BatchState = bpsIdle
+    g_StopRequested = False
+    g_NextScheduledProc = ""
+    Application.StatusBar = False
+    Application.Calculation = xlCalculationAutomatic
+    Application.ScreenUpdating = True
+    Application.EnableEvents = True
+
+    MsgBox "All pending operations cancelled and state reset.", vbInformation
 End Sub
 
 ' Abort handler
@@ -1236,6 +1304,75 @@ CleanUp:
     Application.Calculation = originalCalcMode
     'Application.EnableEvents = True
 End Sub
+
+' ============================================
+' Check if all Greek formulas have computed values
+' Reads entire range into memory in one COM call, then checks in-memory
+' Returns True if all data rows with premium input have evaluated Greeks
+' ============================================
+Private Function AreGreeksComputed(ws As Worksheet, formulaCount As Long, rowSpacing As Long) As Boolean
+    Dim lastRow As Long
+    Dim data As Variant
+    Dim i As Long, r As Long
+    Dim blockStartRow As Long
+    Dim endRow As Long
+    Dim cellVal As Variant
+    Dim col As Long
+
+    ' Greek columns to check (relative to array: col 2=1, col 9=8, col 10=9, etc.)
+    ' Array columns: 1=B(premium), 8=I(IV), 9=J(Delta), 10=K(Vega), 11=L(Gamma), 12=M(Theta), 13=N(Rho)
+    '               21=V(dDelta/dVol), 22=W, 23=X(Charm), 24=Y, 25=Z(Zomma), 26=AA(Vomma), 27=AB(Ultima)
+    Dim greekCols As Variant
+    greekCols = Array(8, 9, 10, 11, 12, 13, 21, 22, 23, 24, 25, 26, 27)
+
+    If formulaCount = 0 Then
+        AreGreeksComputed = True
+        Exit Function
+    End If
+
+    ' Calculate the extent of data: from row 2 to last possible data row
+    lastRow = 2 + (formulaCount - 1) * rowSpacing + rowSpacing - 1
+
+    ' Read cols B through AB (2 through 28) into array in one shot
+    data = ws.Range(ws.Cells(2, 2), ws.Cells(lastRow, 28)).Value
+
+    ' Check each formula block
+    For i = 0 To formulaCount - 1
+        blockStartRow = 1 + (i * rowSpacing)  ' Array is 1-based, block starts at row offset
+        endRow = blockStartRow + rowSpacing - 1
+        If endRow > UBound(data, 1) Then endRow = UBound(data, 1)
+
+        ' Scan data rows within this block
+        For r = blockStartRow To endRow
+            ' Column 1 in array = col B(2) = premium
+            If Not IsEmpty(data(r, 1)) And Not IsError(data(r, 1)) Then
+                ' This row has input data — check all Greek columns
+                Dim g As Long
+                For g = LBound(greekCols) To UBound(greekCols)
+                    col = greekCols(g)
+                    If col > UBound(data, 2) Then GoTo NextGreek
+
+                    cellVal = data(r, col)
+
+                    ' A computed cell is: numeric, empty string, or "NA"
+                    ' An uncomputed cell would be: Error, or still showing formula
+                    If IsError(cellVal) Then
+                        AreGreeksComputed = False
+                        Exit Function
+                    End If
+
+                    If Not IsNumeric(cellVal) And cellVal <> "" And cellVal <> "NA" Then
+                        AreGreeksComputed = False
+                        Exit Function
+                    End If
+NextGreek:
+                Next g
+            End If
+        Next r
+    Next i
+
+    AreGreeksComputed = True
+End Function
 
 ' ============================================
 ' OPTIMIZED: Setup metadata ONLY for rows with actual LSEG data (after refresh)
