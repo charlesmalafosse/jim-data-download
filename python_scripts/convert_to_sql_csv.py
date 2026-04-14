@@ -154,6 +154,11 @@ DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 # whichever your import pipeline expects and override in __main__.
 DEFAULT_NULL_TOKEN = ""
 
+# Sentinel written to numeric columns in place of NaN / empty values so
+# the output CSV never contains empty cells for numeric fields. Change
+# this constant to adjust the fill value globally.
+NAN_FILL_VALUE = 99999
+
 
 def _clean_text(series: pd.Series) -> pd.Series:
     """Trim and null-out sentinel strings. Returns object dtype."""
@@ -264,6 +269,32 @@ def convert(
     t0 = time.monotonic()
 
     out = df.copy()
+
+    # Fill NaN in numeric columns with NAN_FILL_VALUE so the output never
+    # contains empty cells for numeric fields. Cast each column to object
+    # so the int fill renders as "99999" (not "99999.0") while non-null
+    # float values keep their full precision.
+    fill_counts = {}
+    for col in NUMERIC_COLUMNS:
+        if col not in out.columns:
+            continue
+        mask = out[col].isna()
+        n = int(mask.sum())
+        if n:
+            fill_counts[col] = n
+        out[col] = out[col].astype(object)
+        out.loc[mask, col] = NAN_FILL_VALUE
+    if fill_counts:
+        total_filled = sum(fill_counts.values())
+        log.info(
+            "Filled %d NaN cell(s) in numeric columns with %s",
+            total_filled, NAN_FILL_VALUE,
+        )
+        for col, n in fill_counts.items():
+            log.info("  %s: %d", col, n)
+    else:
+        log.info("No NaN values found in numeric columns")
+
     # Format datetimes as strings up front so to_csv doesn't print ISO with 'T'.
     for col in DATETIME_COLUMNS:
         if col not in out.columns:
@@ -272,8 +303,9 @@ def convert(
             lambda v: v.strftime(DATETIME_FORMAT) if pd.notna(v) else None
         )
 
-    # Replace all NaN/NaT/None with the null_token so the CSV has an explicit
-    # NULL marker (empty string by default, or "\\N" if configured).
+    # Replace any remaining NaN/NaT/None (text / datetime columns) with the
+    # null_token so the CSV has an explicit NULL marker. Numeric columns
+    # were already filled with NAN_FILL_VALUE above.
     out = out.astype(object).where(pd.notna(out), None)
 
     log.info("Formatting done in %.1fs", time.monotonic() - t0)
