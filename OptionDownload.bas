@@ -285,6 +285,70 @@ Sub RefreshFutureUnderlyings()
         Exit Sub
     End If
 
+    ' Step 3b: Trim/extend date and formula columns (A-AF) to match date range
+    Application.StatusBar = "Adjusting date range in columns A-AF..."
+    Dim dtStart As Date
+    Dim dtEnd As Date
+    Dim numDays As Long
+    Dim lastUsedRow As Long
+    Dim targetLastRow As Long
+    Dim dateFirstRow As Long
+    Dim formulaTemplateRow As Long
+
+    dateFirstRow = 11       ' Row 11 = first date (hardcoded value)
+    formulaTemplateRow = 12 ' Row 12 = expandable formulas (e.g. =WORKDAY(A11,1))
+
+    On Error Resume Next
+    dtStart = wsFuture.Range(RANGE_UNDERLYING_START_DATE).Value
+    dtEnd = wsFuture.Range(RANGE_UNDERLYING_END_DATE).Value
+    On Error GoTo ErrorHandler
+
+    If dtStart > 0 And dtEnd > 0 And dtEnd > dtStart Then
+        ' Use calendar days + margin to ensure all business days are covered
+        numDays = CLng(dtEnd - dtStart) + 10  ' +10 days margin
+
+        ' Target: row 11 + numDays rows
+        targetLastRow = dateFirstRow + numDays
+
+        ' Set the start date in A11
+        wsFuture.Cells(dateFirstRow, 1).Value = dtStart
+
+        ' Find current last used row in column A
+        lastUsedRow = wsFuture.Cells(wsFuture.Rows.count, 1).End(xlUp).Row
+
+        ' Clear excess rows beyond target (columns A through AF = 1 through 32)
+        If lastUsedRow > targetLastRow Then
+            wsFuture.Range(wsFuture.Cells(targetLastRow + 1, 1), _
+                          wsFuture.Cells(lastUsedRow, 32)).ClearContents
+        End If
+
+        ' Extend formulas from row 12 down to targetLastRow if needed
+        If targetLastRow > formulaTemplateRow Then
+            ' Fill column A with WORKDAY formula from row 12 down
+            wsFuture.Cells(formulaTemplateRow, 1).Formula = "=WORKDAY(A" & (formulaTemplateRow - 1) & ",1)"
+            If targetLastRow > formulaTemplateRow Then
+                wsFuture.Range(wsFuture.Cells(formulaTemplateRow, 1), _
+                              wsFuture.Cells(formulaTemplateRow, 1)).AutoFill _
+                    Destination:=wsFuture.Range(wsFuture.Cells(formulaTemplateRow, 1), _
+                                               wsFuture.Cells(targetLastRow, 1))
+            End If
+
+            ' Fill columns B through AF (2-32) with formulas from row 12 template
+            Dim lastTemplateCol As Long
+            lastTemplateCol = wsFuture.Cells(formulaTemplateRow, wsFuture.Columns.count).End(xlToLeft).Column
+            If lastTemplateCol > 32 Then lastTemplateCol = 32
+            If lastTemplateCol >= 2 And targetLastRow > formulaTemplateRow Then
+                wsFuture.Range(wsFuture.Cells(formulaTemplateRow, 2), _
+                              wsFuture.Cells(formulaTemplateRow, lastTemplateCol)).AutoFill _
+                    Destination:=wsFuture.Range(wsFuture.Cells(formulaTemplateRow, 2), _
+                                               wsFuture.Cells(targetLastRow, lastTemplateCol))
+            End If
+        End If
+
+        Application.StatusBar = "Date range set: " & Format(dtStart, "yyyy-mm-dd") & " to " & Format(dtEnd, "yyyy-mm-dd") & _
+                               " (" & numDays & " calendar days + margin, rows 11 to " & targetLastRow & ")"
+    End If
+
     ' Step 4: Clear existing underlying data
     Application.StatusBar = "Clearing existing underlying data..."
     ' Find the last used column by scanning for empty blocks
@@ -960,6 +1024,14 @@ Sub EmergencyStop()
     Application.OnTime EarliestTime:=Now, Procedure:="RefreshFutureSheet_Complete", Schedule:=False
     Application.OnTime EarliestTime:=Now, Procedure:="RefreshFutureUnderlyings_CheckReady", Schedule:=False
     Application.OnTime EarliestTime:=Now, Procedure:="RefreshFutureUnderlyings_Complete", Schedule:=False
+
+    ' Cancel DownloadFromChain callbacks
+    Application.OnTime EarliestTime:=Now, Procedure:="DownloadFromChain_CheckChainReady", Schedule:=False
+    Application.OnTime EarliestTime:=Now, Procedure:="DownloadFromChain_ProcessNextBatch", Schedule:=False
+    Application.OnTime EarliestTime:=Now, Procedure:="DownloadFromChain_CheckBatchReady", Schedule:=False
+    Application.OnTime EarliestTime:=Now, Procedure:="DownloadFromChain_Complete", Schedule:=False
+    g_ChainState = CHAIN_STATE_IDLE
+    g_ChainStopRequested = False
 
     On Error GoTo 0
 

@@ -55,6 +55,7 @@ CSV_COLUMNS = [
     "DVEGA/DVOL",
     "DVEGA/DVOLDVOL",
     "RIC",
+    "RIC_Underlying",
 ]
 
 # Key columns for duplicate detection
@@ -333,6 +334,10 @@ Examples:
     # Apply overrides
     df = apply_overrides(df, overrides)
 
+    # Replace 3rd letter of Reference with 3rd letter of RIC_Underlying
+    # if "RIC_Underlying" in df.columns and "Reference" in df.columns:
+    #     df["Reference"] = df["Reference"].str[:2] + df["RIC_Underlying"].str[2] + df["Reference"].str[3:]
+
     # Convert types if requested
     if args.convert_types:
         print("\nConverting column types...")
@@ -418,16 +423,28 @@ if __name__ == "__main__":
     #
 
     sys.argv = ["aggregate_files.py",
-    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\COMMO\\Brent\\all","--pattern", "*_batch*.csv",
-        "--output", "downloaded_Brent_20260118.csv",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2026-01-Download\\COMMO\\TTF\\done","--pattern", "*_batch*.csv",
+        "--output", "downloaded_TTF_202601.csv",
+    ]
+    main()
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2026-01-Download\COMMO\Brent\\done","--pattern", "*_batch*.csv",
+        "--output", "downloaded_TTF_2020-now_20260126.csv",
+    ]
+    main()
+
+    sys.argv = ["aggregate_files.py",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\COMMO\\SI\\all","--pattern", "*_batch*.csv",
+        "--output", "downloaded_SI_20260118.csv",
     ]
     main()   
 
     sys.argv = ["aggregate_files.py",
-    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\COMMO\\Gasoil\\all","--pattern", "*_batch*.csv",
-        "--output", "downloaded_Gasoil_20260118.csv",
+    "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\COMMO\\GC\\done5","--pattern", "*_batch*.csv",
+        "--output", "downloaded_GC_step5_20260118.csv",
     ]
-    main()   
+    main()    
+    
 
     sys.argv = ["aggregate_files.py",
     "--input-dir", "C:\\Users\\charl\\Dropbox\\MARINER\\DOWNLOAD_FILES\\DOWNLOAD_MONTHLY\\2025-12-Download\\COMMO\\HO\\alloct","--pattern", "*_batch*.csv",
