@@ -648,8 +648,8 @@ Function BuildOptionBloombergTicker(underlyingBloomTicker As String, optType As 
         strikeStr = Format(strike, "0.0##")
     End If
 
-    ' Build option Bloomberg ticker: "OEZ25 C70"
-    BuildOptionBloombergTicker = baseTickerPart & " " & CallPut & strikeStr
+    ' Build option Bloomberg ticker: "OEZ25C 70 Comdty"
+    BuildOptionBloombergTicker = baseTickerPart & CallPut & " " & strikeStr & " Comdty"
 End Function
 
 Function BuildWeeklyOptionBloombergTicker(underlyingBloomTicker As String, optType As String, strike As Double, weekNum As Integer) As String
@@ -712,8 +712,8 @@ Function BuildWeeklyOptionBloombergTicker(underlyingBloomTicker As String, optTy
         strikeStr = Format(strike, "0.0##")
     End If
 
-    ' Build weekly option Bloomberg ticker: "OE2Z25 C100"
-    BuildWeeklyOptionBloombergTicker = rootBB & weekNum & monthYear & " " & CallPut & strikeStr
+    ' Build weekly option Bloomberg ticker: "OE2Z25C 100 Comdty"
+    BuildWeeklyOptionBloombergTicker = rootBB & weekNum & monthYear & CallPut & " " & strikeStr & " Comdty"
 End Function
 
 Function RICWeeklyOptionToBloomberg(ric As String, weekNum As Integer, _
