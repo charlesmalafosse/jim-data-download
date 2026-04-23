@@ -5,7 +5,10 @@
       "Bash(grep:*)",
       "Bash(python -c ':*)",
       "Bash(python -m py_compile \"c:/Users/charl/Dropbox/MARINER/DOWNLOAD_FILES/0 - TEMPLATE/DOWNLOAD_MONTHLY/python_scripts/convert_to_sql_csv.py\")",
-      "Bash(python _validate_sql_csv.py)"
+      "Bash(python _validate_sql_csv.py)",
+      "Bash(cat)",
+      "Bash(python3 /tmp/parse_rates.py)",
+      "Bash(awk '/<row r=\"11\"/{flag=1} flag{print} /<\\\\/row>/{if\\(flag\\) exit}' /tmp/xlsm_extract/xl/worksheets/sheet3.xml)"
     ]
   }
 }

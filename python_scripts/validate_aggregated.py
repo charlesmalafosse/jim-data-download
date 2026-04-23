@@ -168,6 +168,49 @@ def check_month_gaps(df: pd.DataFrame) -> list[str]:
     return errors
 
 
+def check_maturity_month_gaps(df: pd.DataFrame) -> list[str]:
+    """Detect missing months in Maturity between the first and last maturity date."""
+    errors = []
+    if "Maturity" not in df.columns:
+        errors.append("[SKIP] Maturity column not found")
+        return errors
+
+    dates = pd.to_datetime(df["Maturity"], errors="coerce").dropna()
+    if dates.empty:
+        errors.append("[WARN] No valid dates in Maturity")
+        return errors
+
+    start = dates.min()
+    end = dates.max()
+    errors.append(f"[INFO] Maturity range: {start.date()} to {end.date()}")
+
+    present = set(zip(dates.dt.year, dates.dt.month))
+
+    expected = set()
+    current = start.replace(day=1)
+    end_month = end.replace(day=1)
+    while current <= end_month:
+        expected.add((current.year, current.month))
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1)
+        else:
+            current = current.replace(month=current.month + 1)
+
+    missing = sorted(expected - present)
+    if missing:
+        by_year = {}
+        for y, m in missing:
+            by_year.setdefault(y, []).append(m)
+        errors.append(f"[WARN] {len(missing)} missing month(s) in Maturity dates:")
+        for y in sorted(by_year):
+            months_str = ", ".join(f"{m:02d}" for m in by_year[y])
+            errors.append(f"       {y}: {months_str}")
+    else:
+        errors.append(f"[PASS] No maturity month gaps ({len(present)} months covered)")
+
+    return errors
+
+
 def check_maturity_before_spot(df: pd.DataFrame) -> list[str]:
     """Check for rows where Maturity < Spot_Date (expired at observation)."""
     errors = []
@@ -259,17 +302,19 @@ def run_validation(filepath: str, iv_max: float, spot_min: float, spot_max: floa
          check_numeric_column(df, "Implied_Volatility", min_val=0, max_val=iv_max)),
         ("4. Month Gaps in Spot_Date",
          check_month_gaps(df)),
-        ("5. Maturity vs Spot_Date",
+        ("5. Maturity Month Gaps",
+         check_maturity_month_gaps(df)),
+        ("6. Maturity vs Spot_Date",
          check_maturity_before_spot(df)),
-        ("6. Premium",
+        ("7. Premium",
          check_numeric_column(df, "Premium")),
-        ("7. Strike",
+        ("8. Strike",
          check_numeric_column(df, "Strike", min_val=0)),
-        ("8. Missing Values in Critical Columns",
+        ("9. Missing Values in Critical Columns",
          check_missing_values(df)),
-        ("9. Duplicate Rows",
+        ("10. Duplicate Rows",
          check_duplicates(df)),
-        ("10. Type Values",
+        ("11. Type Values",
          check_type_values(df)),
     ]
 

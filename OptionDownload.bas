@@ -304,8 +304,16 @@ Sub RefreshFutureUnderlyings()
     On Error GoTo ErrorHandler
 
     If dtStart > 0 And dtEnd > 0 And dtEnd > dtStart Then
-        ' Use calendar days + margin to ensure all business days are covered
-        numDays = CLng(dtEnd - dtStart) + 10  ' +10 days margin
+        ' Cap end date at today (no data exists for future dates)
+        Dim effectiveEnd As Date
+        If dtEnd > Date Then
+            effectiveEnd = Date
+        Else
+            effectiveEnd = dtEnd
+        End If
+
+        ' Use NETWORKDAYS for exact business-day count (column A uses WORKDAY)
+        numDays = Application.WorksheetFunction.NetworkDays(dtStart, effectiveEnd) + 5
 
         ' Target: row 11 + numDays rows
         targetLastRow = dateFirstRow + numDays
@@ -345,8 +353,9 @@ Sub RefreshFutureUnderlyings()
             End If
         End If
 
-        Application.StatusBar = "Date range set: " & Format(dtStart, "yyyy-mm-dd") & " to " & Format(dtEnd, "yyyy-mm-dd") & _
-                               " (" & numDays & " calendar days + margin, rows 11 to " & targetLastRow & ")"
+        Application.StatusBar = "Date range set: " & Format(dtStart, "yyyy-mm-dd") & " to " & Format(effectiveEnd, "yyyy-mm-dd") & _
+                               " (" & numDays & " business days + margin, rows 11 to " & targetLastRow & ")"
+
     End If
 
     ' Step 4: Clear existing underlying data
@@ -509,11 +518,90 @@ Sub RefreshFutureUnderlyings_Complete()
     g_FutureSheet.Calculate
     DoEvents
 
+    ' Trim rate ranges to match the date range now that LSEG has populated data.
+    ' Each named range points to the first LSEG formula cell (row 11).
+    ' Columns 1-2 are LSEG-populated; column 3 is an expansion formula.
+    TrimRateRanges g_FutureSheet
+
     Application.StatusBar = False
 
     MsgBox "Added " & g_FutureUnderlyingCount & " underlyings to " & SHEET_FUTURE & " in alphabetical order." & vbNewLine & _
            "Data refresh complete. Please verify the downloaded data." & vbNewLine & _
            "IMPORTANT: Add Bloomberg equivalent for underlying RICs in RicBloomberg range.", vbInformation
+End Sub
+
+Sub TrimRateRanges(wsFuture As Worksheet)
+    Dim rateRangeNames As Variant
+    Dim rateRng As Range
+    Dim rateCol As Long
+    Dim rateLastRow As Long
+    Dim rateRC As Long
+    Dim rateRL As Long
+    Dim targetLastRow As Long
+    Dim dtStart As Date
+    Dim dtEnd As Date
+    Dim effectiveEnd As Date
+    Dim numDays As Long
+    Dim dateFirstRow As Long
+    Dim formulaTemplateRow As Long
+
+    dateFirstRow = 11
+    formulaTemplateRow = 12
+
+    On Error Resume Next
+    dtStart = wsFuture.Range(RANGE_UNDERLYING_START_DATE).Value
+    dtEnd = wsFuture.Range(RANGE_UNDERLYING_END_DATE).Value
+    On Error GoTo 0
+
+    If dtStart = 0 Or dtEnd = 0 Or dtEnd <= dtStart Then Exit Sub
+
+    If dtEnd > Date Then
+        effectiveEnd = Date
+    Else
+        effectiveEnd = dtEnd
+    End If
+
+    numDays = Application.WorksheetFunction.NetworkDays(dtStart, effectiveEnd) + 5
+    targetLastRow = dateFirstRow + numDays
+
+    rateRangeNames = Array("RatesUSD", "RatesUSD6m", "RatesUSD1y", "RatesUSD2y", _
+                           "RatesEUR", "RatesEUR3m", "RatesEUR6m", "RatesEUR1y", "RatesGBP")
+
+    Application.StatusBar = "Trimming rate ranges to " & targetLastRow & " rows..."
+
+    Dim rn As Variant
+    For Each rn In rateRangeNames
+        Set rateRng = Nothing
+        On Error Resume Next
+        Set rateRng = wsFuture.Range(CStr(rn))
+        On Error GoTo 0
+
+        If Not rateRng Is Nothing Then
+            rateCol = rateRng.Column
+
+            ' Find last used row across the 3 columns of this range
+            rateLastRow = 0
+            For rateRC = rateCol To rateCol + 2
+                rateRL = wsFuture.Cells(wsFuture.Rows.count, rateRC).End(xlUp).Row
+                If rateRL > rateLastRow Then rateLastRow = rateRL
+            Next rateRC
+
+            ' Clear excess rows beyond target
+            If rateLastRow > targetLastRow Then
+                wsFuture.Range(wsFuture.Cells(targetLastRow + 1, rateCol), _
+                              wsFuture.Cells(rateLastRow, rateCol + 2)).ClearContents
+            End If
+
+            ' AutoFill the expansion formula (col 3) from template row down
+            If targetLastRow > formulaTemplateRow Then
+                If Not IsEmpty(wsFuture.Cells(formulaTemplateRow, rateCol + 2).Value) Then
+                    wsFuture.Cells(formulaTemplateRow, rateCol + 2).AutoFill _
+                        Destination:=wsFuture.Range(wsFuture.Cells(formulaTemplateRow, rateCol + 2), _
+                                                   wsFuture.Cells(targetLastRow, rateCol + 2))
+                End If
+            End If
+        End If
+    Next rn
 End Sub
 
 

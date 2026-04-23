@@ -295,6 +295,24 @@ def convert(
     else:
         log.info("No NaN values found in numeric columns")
 
+    # Convert floats to fixed-point strings so MySQL DECIMAL columns can
+    # parse them (scientific notation like 1.18e-05 is rejected by MySQL).
+    log.info("Converting numeric columns to fixed-point notation")
+
+    def _float_to_fixed(v):
+        if not isinstance(v, float):
+            return v
+        s = f"{v:.20f}"
+        # Strip trailing zeros but keep at least one decimal digit
+        if "." in s:
+            s = s.rstrip("0").rstrip(".")
+        return s
+
+    for col in NUMERIC_COLUMNS:
+        if col not in out.columns:
+            continue
+        out[col] = out[col].apply(_float_to_fixed)
+
     # Format datetimes as strings up front so to_csv doesn't print ISO with 'T'.
     for col in DATETIME_COLUMNS:
         if col not in out.columns:
@@ -318,7 +336,7 @@ def convert(
         columns=SQL_COLUMNS,
         na_rep=null_token,
         quoting=csv.QUOTE_MINIMAL,
-        lineterminator="\n",
+        line_terminator="\n",
     )
     log.info("Wrote %d rows in %.1fs", total, time.monotonic() - t0)
 
