@@ -8,7 +8,6 @@ Attribute VB_Name = "SetupConfig"
 Public Const SHEET_CONFIG As String = "Config"
 Public Const SHEET_PROGRESS As String = "Progress"
 Public Const SHEET_COLLECTION As String = "DataCollection"
-Public Const SHEET_STAGING As String = "Staging"
 Public Const SHEET_QUALITY As String = "QualityReport"
 Public Const SHEET_FUTURE As String = "Future et co"
 Public Const SHEET_MAIN As String = "Main"
@@ -23,7 +22,6 @@ Sub SetupCompleteWorkbook()
     CreateFutureSheet
     CreateProgressSheet
     CreateDataCollectionSheet
-    CreateStagingSheet
     CreateQualityReportSheet
     CreateOptionDataSheets
     
@@ -408,40 +406,6 @@ Sub CreateDataCollectionSheet()
 End Sub
 
 ' ============================================
-' STAGING SHEET SETUP
-' ============================================
-Sub CreateStagingSheet()
-    Dim ws As Worksheet
-    
-    On Error Resume Next
-    Application.DisplayAlerts = False
-    ThisWorkbook.Sheets("Staging").Delete
-    Application.DisplayAlerts = True
-    On Error GoTo 0
-    
-    Set ws = ThisWorkbook.Sheets.Add
-    ws.Name = "Staging"
-    
-    ' Copy structure from DataCollection
-    ThisWorkbook.Sheets("DataCollection").Range("A1:AA1").Copy
-    ws.Range("A1").PasteSpecial xlPasteAll
-    
-    ' Add validation column
-    ws.Range("AB1").Value = "Validation_Status"
-    ws.Range("AB1").Font.Bold = True
-    ws.Range("AB1").Interior.Color = RGB(200, 200, 255)
-    
-    ' Apply same formatting
-    ws.Columns("A").NumberFormat = "mm/dd/yyyy"
-    ws.Columns("B").NumberFormat = "#,##0.0000"
-    ws.Columns("D").NumberFormat = "mm/dd/yyyy"
-    ws.Columns("E").NumberFormat = "0.00%"
-    ws.Columns("F:G").NumberFormat = "#,##0.00"
-    ws.Columns("I:AA").NumberFormat = "0.0000"
-    ws.Columns("A:AB").ColumnWidth = 12
-End Sub
-
-' ============================================
 ' QUALITY REPORT SHEET SETUP
 ' ============================================
 Sub CreateQualityReportSheet()
@@ -473,20 +437,23 @@ Sub CreateQualityReportSheet()
         .Range("A6").Font.Bold = True
         .Range("A6").Font.Size = 12
         
+        ' KPIs read from RIC_List (col I = Processed, col N = Validation).
+        ' Note: GenerateQualityReport overwrites this sheet on each run; these
+        ' formulas only show until the first run.
         .Range("A7").Value = "Total Options Processed:"
-        .Range("B7").Formula = "=COUNTA(Staging!A:A)-1"
-        
+        .Range("B7").Formula = "=COUNTIF(RIC_List!I:I,""Yes"")"
+
         .Range("A8").Value = "Valid Data (OK):"
-        .Range("B8").Formula = "=COUNTIF(Staging!AB:AB,""OK"")"
-        
+        .Range("B8").Formula = "=COUNTIF(RIC_List!N:N,""OK"")"
+
         .Range("A9").Value = "High IV Warnings:"
-        .Range("B9").Formula = "=COUNTIF(Staging!AB:AB,""High"")"
-        
+        .Range("B9").Formula = "=COUNTIF(RIC_List!N:N,""High"")"
+
         .Range("A10").Value = "Low IV Warnings:"
-        .Range("B10").Formula = "=COUNTIF(Staging!AB:AB,""Low"")"
-        
+        .Range("B10").Formula = "=COUNTIF(RIC_List!N:N,""Low"")+COUNTIF(RIC_List!N:N,""Too Low"")"
+
         .Range("A11").Value = "Missing Data:"
-        .Range("B11").Formula = "=COUNTIF(Staging!AB:AB,""Missing"")"
+        .Range("B11").Formula = "=COUNTIF(RIC_List!N:N,""Missing"")"
         
         .Range("A12").Value = "Success Rate:"
         .Range("B12").Formula = "=IF(B7>0,B8/B7,0)"

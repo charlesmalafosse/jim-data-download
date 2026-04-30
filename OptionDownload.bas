@@ -52,7 +52,6 @@ Public g_FutureFormulaStartRow As Long  ' First row where RHistory data starts
 Public Const SHEET_CONFIG As String = "Config"
 Public Const SHEET_RIC_LIST As String = "RIC_List"  ' Now used for progress tracking
 Public Const SHEET_COLLECTION As String = "DataCollection"
-Public Const SHEET_STAGING As String = "Staging"
 Public Const SHEET_QUALITY As String = "QualityReport"
 Public Const SHEET_FUTURE As String = "Future et co"
 
@@ -66,6 +65,12 @@ Public Const RANGE_RFR As String = "RFR"
 Public Const MAX_UNDERLYING_ROWS As Long = 10000  ' Maximum rows for underlying price data and VLOOKUP ranges
 Public Const ROW_SPACING As Long = 1000  ' Spacing between formulas in DataCollection sheet
 Public Const ENABLE_RETRY_ON_FAILURE As Boolean = False  ' Set to True to retry failed downloads with alternate RIC format
+
+' In-memory batch buffer for direct CSV export
+Private g_BatchRows() As Variant
+Private g_BatchRowCount As Long
+Private Const BATCH_INITIAL_CAPACITY As Long = 10000
+Private Const BATCH_COL_COUNT As Long = 29
 
 ' Types
 Type BatchInfo
@@ -360,13 +365,18 @@ Sub RefreshFutureUnderlyings()
 
     ' Step 4: Clear existing underlying data
     Application.StatusBar = "Clearing existing underlying data..."
-    ' Find the last used column by scanning for empty blocks
+    ' Find the last used column by scanning for empty blocks.
+    ' Each underlying block spans 3 columns starting at (startCol - 1):
+    '   col -1: RHistory formula + "Date" header
+    '   col  0: underlying ticker name (in startRow) + "Last Price" header
+    '   col +1: "Added: ..." metadata
+    ' We scan at startRow which holds the ticker name (the named range column).
     clearEndCol = startCol
     Dim scanCol As Long
     scanCol = startCol
     Do While True
         If wsFuture.Cells(startRow, scanCol).Value <> "" Then
-            clearEndCol = scanCol + 2  ' Include all 3 columns of this block
+            clearEndCol = scanCol + 1  ' This block occupies (scanCol-1, scanCol, scanCol+1)
         End If
         scanCol = scanCol + 3
         ' Stop if we find 2 consecutive empty blocks
@@ -376,12 +386,13 @@ Sub RefreshFutureUnderlyings()
         End If
     Loop
 
-    ' Clear the data area - clear up to MAX_UNDERLYING_ROWS from startRow (not entire sheet)
-    ' This prevents accidentally clearing formulas/data far below the expected range
+    ' Clear the data area - clear up to MAX_UNDERLYING_ROWS from startRow (not entire sheet).
+    ' Start one column LEFT of startCol to include the leftmost formula/header column
+    ' of every block (the named range UnderlyingDownload sits in the middle column).
     Dim clearEndRow As Long
     clearEndRow = startRow + MAX_UNDERLYING_ROWS
 
-    wsFuture.Range(wsFuture.Cells(startRow, startCol), wsFuture.Cells(clearEndRow, clearEndCol)).ClearContents
+    wsFuture.Range(wsFuture.Cells(startRow, startCol - 1), wsFuture.Cells(clearEndRow, clearEndCol)).ClearContents
 
     ' Step 5: Add all underlyings in alphabetical order
     Application.StatusBar = "Adding " & arraySize & " underlyings in alphabetical order..."
@@ -616,8 +627,7 @@ Sub InitializeWorkbook()
     Dim sheetNames As Variant
     Dim i As Integer
     
-    sheetNames = Array(SHEET_CONFIG, SHEET_RIC_LIST, SHEET_COLLECTION, _
-                      SHEET_STAGING, SHEET_QUALITY)
+    sheetNames = Array(SHEET_CONFIG, SHEET_RIC_LIST, SHEET_COLLECTION, SHEET_QUALITY)
     
     For i = 0 To UBound(sheetNames)
         On Error Resume Next
@@ -631,7 +641,6 @@ Sub InitializeWorkbook()
     
     ' Setup headers
     SetupRICListSheet  ' Setup RIC_List with all needed columns
-    SetupStagingSheet
     SetupQualitySheet
 End Sub
 
@@ -796,9 +805,8 @@ Sub ProcessBatch_SetupFormulas()
     Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
     Set wsCollection = ThisWorkbook.Worksheets(SHEET_COLLECTION)
 
-    Application.StatusBar = "Batch #" & g_BatchCounter & ": Clearing collection and staging sheets..."
+    Application.StatusBar = "Batch #" & g_BatchCounter & ": Clearing collection sheet..."
     ClearCollectionSheet
-    ClearStagingSheet
 
     ' Setup formulas
     currentRow = 2
@@ -916,6 +924,9 @@ Sub ProcessBatch_ProcessResults()
     g_BatchState = bpsProcessingResults
     Set wsCollection = ThisWorkbook.Worksheets(SHEET_COLLECTION)
 
+    ' Reset the in-memory batch buffer for this batch's CSV
+    ResetBatchBuffer
+
     ' Setup metadata and Greek formulas ONLY for rows with actual LSEG data
     ' This is the optimized "lazy initialization" approach - metadata was deferred from Phase 1
     Application.StatusBar = "Batch #" & g_BatchCounter & ": Setting up metadata for data rows..."
@@ -950,7 +961,7 @@ Sub ProcessBatch_ProcessResults()
        End If
     Loop
 
-    Application.StatusBar = "Batch #" & g_BatchCounter & ": Validating and copying data to staging..."
+    Application.StatusBar = "Batch #" & g_BatchCounter & ": Validating and buffering data..."
     ValidateAndUpdateRICListWithSpacing wsCollection, g_FormulaCount
 
     ' Retry failed RICs with alternate format (toggle expired suffix)
@@ -963,7 +974,7 @@ Sub ProcessBatch_ProcessResults()
     'Application.Calculate
 
     Application.StatusBar = "Batch #" & g_BatchCounter & ": Saving to CSV..."
-    SaveStagingToCSV GetBatchNumberFromRow(g_BatchStartRow)
+    WriteBatchToCSV GetBatchNumberFromRow(g_BatchStartRow)
 
     ' Save workbook every 5 batches
     If g_BatchCounter Mod 5 = 0 Then
@@ -1128,7 +1139,7 @@ Sub EmergencyStop()
     g_StopRequested = False
     g_NextScheduledProc = ""
     Application.StatusBar = False
-    Application.Calculation = xlCalculationAutomatic
+    Application.Calculation = xlCalculationManual
     Application.ScreenUpdating = True
     Application.EnableEvents = True
 
@@ -1694,18 +1705,16 @@ End Sub
 ' OPTIMIZED: Copy data rows to staging using array transfer
 ' Phase 2: Uses array-based operations instead of cell-by-cell for ~99% faster performance
 ' ============================================
-Sub CopyDataRowsToStaging(ws As Worksheet, startRow As Long, maxRows As Long)
+' Build a remapped destination array from a DataCollection block and append
+' it to the in-memory batch buffer (g_BatchRows) for the current batch's CSV.
+Sub BuildAndAppendBatchRows(ws As Worksheet, startRow As Long, maxRows As Long)
     Dim firstDataRow As Long, lastDataRow As Long
     Dim srcData As Variant
     Dim destData() As Variant
     Dim rowCount As Long, i As Long, destIdx As Long
-    Dim wsDest As Worksheet
-    Dim destStartRow As Long
     Dim internalIdValue As String
     Dim endRow As Long
     Dim cellVal As Variant
-
-    Set wsDest = ThisWorkbook.Worksheets(SHEET_STAGING)
 
     ' Get Internal_ID once
     On Error Resume Next
@@ -1748,7 +1757,7 @@ Sub CopyDataRowsToStaging(ws As Worksheet, startRow As Long, maxRows As Long)
 
     If validRowCount = 0 Then Exit Sub
 
-    ReDim destData(1 To validRowCount, 1 To 29)
+    ReDim destData(1 To validRowCount, 1 To BATCH_COL_COUNT)
 
     ' Second pass: populate destination array with column remapping
     destIdx = 0
@@ -1788,11 +1797,110 @@ Sub CopyDataRowsToStaging(ws As Worksheet, startRow As Long, maxRows As Long)
         End If
     Next i
 
-    ' Get destination start row ONCE
-    destStartRow = wsDest.Cells(wsDest.Rows.count, 1).End(xlUp).Row + 1
+    AppendRowsToBatch destData, validRowCount
+End Sub
 
-    ' Write entire array to destination (single operation)
-    wsDest.Range(wsDest.Cells(destStartRow, 1), wsDest.Cells(destStartRow + validRowCount - 1, 29)).Value2 = destData
+' Reset the in-memory batch buffer at the start of every batch.
+Sub ResetBatchBuffer()
+    ReDim g_BatchRows(1 To BATCH_INITIAL_CAPACITY, 1 To BATCH_COL_COUNT)
+    g_BatchRowCount = 0
+End Sub
+
+' Append a remapped block to the in-memory batch buffer, growing capacity
+' (doubling) as needed via ReDim Preserve. srcData is 1-based, 29 cols.
+Sub AppendRowsToBatch(srcData As Variant, srcRowCount As Long)
+    If srcRowCount <= 0 Then Exit Sub
+
+    ' Determine current capacity (UBound errors if array was never ReDim'd)
+    Dim currentCapacity As Long
+    currentCapacity = 0
+    On Error Resume Next
+    currentCapacity = UBound(g_BatchRows, 1)
+    On Error GoTo 0
+
+    If currentCapacity = 0 Then
+        ReDim g_BatchRows(1 To BATCH_INITIAL_CAPACITY, 1 To BATCH_COL_COUNT)
+        currentCapacity = BATCH_INITIAL_CAPACITY
+    End If
+
+    ' Grow if needed (double until it fits)
+    Do While g_BatchRowCount + srcRowCount > currentCapacity
+        currentCapacity = currentCapacity * 2
+    Loop
+    If currentCapacity > UBound(g_BatchRows, 1) Then
+        ReDim Preserve g_BatchRows(1 To currentCapacity, 1 To BATCH_COL_COUNT)
+    End If
+
+    Dim i As Long, c As Long
+    For i = 1 To srcRowCount
+        For c = 1 To BATCH_COL_COUNT
+            g_BatchRows(g_BatchRowCount + i, c) = srcData(i, c)
+        Next c
+    Next i
+    g_BatchRowCount = g_BatchRowCount + srcRowCount
+End Sub
+
+' Headers for the batch CSV (29 columns, in SQL-friendly order).
+Function GetBatchCSVHeaders() As Variant
+    Dim h(1 To 1, 1 To BATCH_COL_COUNT) As Variant
+    h(1, 1) = "Spot_Date"
+    h(1, 2) = "Premium"
+    h(1, 3) = "Ticker"
+    h(1, 4) = "Maturity"
+    h(1, 5) = "Interest_rate"
+    h(1, 6) = "Spot"
+    h(1, 7) = "Strike"
+    h(1, 8) = "Type"
+    h(1, 9) = "Implied_Volatility"
+    h(1, 10) = "Delta"
+    h(1, 11) = "Vega"
+    h(1, 12) = "Gamma"
+    h(1, 13) = "Theta"
+    h(1, 14) = "Rho"
+    h(1, 15) = "Lot_size"
+    h(1, 16) = "Name"
+    h(1, 17) = "Reference"
+    h(1, 18) = "ccy_pair"
+    h(1, 19) = "Internal_ID"
+    h(1, 20) = "Dividend"
+    h(1, 21) = "DDELTA/DVOL"
+    h(1, 22) = "DDELTA/DVOLDVOL"
+    h(1, 23) = "DDELTA/DTIME"
+    h(1, 24) = "DGAMMA/DSPOT"
+    h(1, 25) = "DGAMMA/DVOL"
+    h(1, 26) = "DVEGA/DVOL"
+    h(1, 27) = "DVEGA/DVOLDVOL"
+    h(1, 28) = "RIC"
+    h(1, 29) = "RIC_Underlying"
+    GetBatchCSVHeaders = h
+End Function
+
+' Write the in-memory batch buffer to a timestamped CSV via WriteArrayToCSV.
+Sub WriteBatchToCSV(Optional batchNumber As Long = 0)
+    If g_BatchRowCount <= 0 Then Exit Sub
+
+    Dim csvPath As String, fileName As String
+
+    If batchNumber > 0 Then
+        fileName = g_RootRIC & "_" & Format(Date, "yyyymmdd") & "_" & Format(Now, "HHmmss") & "_batch" & batchNumber & ".csv"
+    Else
+        fileName = g_RootRIC & "_" & Format(Date, "yyyymmdd") & "_" & Format(Now, "HHmmss") & ".csv"
+    End If
+    csvPath = ThisWorkbook.Path & "\" & fileName
+
+    ' Slice g_BatchRows down to actual row count before writing
+    Dim sliced() As Variant
+    ReDim sliced(1 To g_BatchRowCount, 1 To BATCH_COL_COUNT)
+    Dim r As Long, c As Long
+    For r = 1 To g_BatchRowCount
+        For c = 1 To BATCH_COL_COUNT
+            sliced(r, c) = g_BatchRows(r, c)
+        Next c
+    Next r
+
+    WriteArrayToCSV sliced, csvPath, GetBatchCSVHeaders()
+
+    Application.StatusBar = "Auto-saved: " & fileName & " (" & g_BatchRowCount & " rows)"
 End Sub
 
 ' Modified validation function to handle spacing
@@ -1811,9 +1919,8 @@ Sub ValidateAndUpdateRICListWithSpacing(wsCollection As Worksheet, formulaCount 
 
     Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
 
-    ' Force recalculation to ensure all values are populated
-    wsCollection.Calculate
-    Application.Wait Now + TimeValue("00:00:02")
+    ' Caller (ProcessBatch_ProcessResults) already runs Calculate and waits
+    ' for xlDone before invoking us — no need to recalculate here.
 
     For i = 0 To formulaCount - 1
         formulaRow = 2 + (i * ROW_SPACING)
@@ -1888,7 +1995,7 @@ Sub ValidateAndUpdateRICListWithSpacing(wsCollection As Worksheet, formulaCount 
                     End If
                 Next findRow
                 ' Copy the rows with data to staging
-                CopyDataRowsToStaging wsCollection, formulaRow, lastDataRow - formulaRow + 1
+                BuildAndAppendBatchRows wsCollection, formulaRow, lastDataRow - formulaRow + 1
             Else
                 ' Failed download
                 wsRIC.Cells(ricRow, 9).Value = "Error"  ' Processed (column I)
@@ -2226,7 +2333,7 @@ Sub ValidateAndUpdateRICList(wsCollection As Worksheet, startRow As Long, endRow
 
                 ' Copy to staging - export all data that was successfully downloaded
                 ' (validation is for quality info, not a gate for export)
-                CopyDataRowsToStaging wsCollection, i, 1
+                BuildAndAppendBatchRows wsCollection, i, 1
             Else
                 ' Failed download
                 wsRIC.Cells(ricRow, 9).Value = "Error"  ' Processed (column I)
@@ -2654,7 +2761,7 @@ Sub RetryFailedRICsInBatch(wsCollection As Worksheet, batchStartRow As Long, bat
                                 Exit For
                             End If
                         Next findRow
-                        CopyDataRowsToStaging wsCollection, formulaRow, lastDataRow - formulaRow + 1
+                        BuildAndAppendBatchRows wsCollection, formulaRow, lastDataRow - formulaRow + 1
                     Else
                         ' Retry also failed
                         wsRIC.Cells(i, 15).Value = "Retry failed: " & alternateRIC
@@ -2676,59 +2783,175 @@ End Sub
 Sub GenerateQualityReport()
     Dim ws As Worksheet
     Dim wsRIC As Worksheet
-    Dim summaryRow As Long
-    Dim totalProcessed As Long
-    Dim totalSuccess As Long
-    Dim totalErrors As Long
-    
+    Dim row As Long
+    Dim i As Long
+    Dim lastRow As Long
+    Dim totalProcessed As Long, totalSuccess As Long, totalErrors As Long
+    Dim ivCounts As Object
+    Dim maturityCounts As Object
+    Dim status As String
+    Dim validation As String
+    Dim maturityVal As Variant
+    Dim maturityKey As String
+    Dim counts As Variant
+
     Set ws = ThisWorkbook.Worksheets(SHEET_QUALITY)
     Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
-    
+    Set ivCounts = CreateObject("Scripting.Dictionary")
+    Set maturityCounts = CreateObject("Scripting.Dictionary")
+
     ws.Cells.Clear
-    
-    ' Count statistics from RIC_List
-    Dim lastRow As Long
-    Dim i As Long
+
+    ' Pre-seed IV categories so they appear in a fixed, meaningful order
+    Dim ivCategories As Variant
+    ivCategories = Array("OK", "High", "Too High", "Too Low", "Missing", "Convergence Failed", "Expired")
+    For i = 0 To UBound(ivCategories)
+        ivCounts.Add CStr(ivCategories(i)), 0
+    Next i
+
     lastRow = wsRIC.Cells(wsRIC.Rows.count, "A").End(xlUp).Row
-    
+
+    ' Single pass over RIC_List
     For i = 2 To lastRow
-        If wsRIC.Cells(i, 9).Value <> "No" And wsRIC.Cells(i, 9).Value <> "" Then  ' Column I: Processed
+        status = CStr(wsRIC.Cells(i, 9).Value)         ' Column I: Processed
+        validation = Trim(CStr(wsRIC.Cells(i, 14).Value))  ' Column N: Validation
+        maturityVal = wsRIC.Cells(i, 2).Value          ' Column B: Maturity
+
+        ' Tally Processed/Success/Error
+        If status <> "No" And status <> "" Then
             totalProcessed = totalProcessed + 1
-            If wsRIC.Cells(i, 9).Value = "Yes" Then
+            If status = "Yes" Then
                 totalSuccess = totalSuccess + 1
-            ElseIf wsRIC.Cells(i, 9).Value = "Error" Then
+            ElseIf status = "Error" Then
                 totalErrors = totalErrors + 1
             End If
         End If
+
+        ' Tally IV validation
+        If validation <> "" Then
+            If ivCounts.Exists(validation) Then
+                ivCounts(validation) = ivCounts(validation) + 1
+            Else
+                ivCounts.Add validation, 1
+            End If
+        End If
+
+        ' Tally maturity coverage by year-month
+        If IsDate(maturityVal) Then
+            maturityKey = Format(maturityVal, "yyyy-mm")
+            If Not maturityCounts.Exists(maturityKey) Then
+                maturityCounts.Add maturityKey, Array(0, 0, 0)
+            End If
+            counts = maturityCounts(maturityKey)
+            counts(0) = counts(0) + 1
+            If status = "Yes" Then counts(1) = counts(1) + 1
+            If status = "Error" Then counts(2) = counts(2) + 1
+            maturityCounts(maturityKey) = counts
+        End If
     Next i
-    
-    ' Generate report
+
+    ' --- Header ---
     ws.Range("A1").Value = "Option Data Quality Report"
-    ws.Range("A2").Value = "Generated: " & Now
-    ws.Range("A3").Value = "Root RIC: " & g_RootRIC
-    
-    summaryRow = 5
-    ws.Cells(summaryRow, 1).Value = "Summary Statistics"
-    ws.Cells(summaryRow + 1, 1).Value = "Total RICs:"
-    ws.Cells(summaryRow + 1, 2).Value = lastRow - 1
-    
-    ws.Cells(summaryRow + 2, 1).Value = "Processed:"
-    ws.Cells(summaryRow + 2, 2).Value = totalProcessed
-    
-    ws.Cells(summaryRow + 3, 1).Value = "Successful:"
-    ws.Cells(summaryRow + 3, 2).Value = totalSuccess
-    
-    ws.Cells(summaryRow + 4, 1).Value = "Errors:"
-    ws.Cells(summaryRow + 4, 2).Value = totalErrors
-    
-    ws.Cells(summaryRow + 5, 1).Value = "Success Rate:"
-    If totalProcessed > 0 Then
-        ws.Cells(summaryRow + 5, 2).Value = Format(totalSuccess / totalProcessed, "0.0%")
-    End If
-    
     ws.Range("A1").Font.Bold = True
     ws.Range("A1").Font.Size = 14
-    ws.Columns("A:B").AutoFit
+    ws.Range("A2").Value = "Generated: " & Format(Now, "yyyy-mm-dd hh:mm:ss")
+    ws.Range("A3").Value = "Root RIC: " & g_RootRIC
+
+    ' --- Summary Statistics ---
+    row = 5
+    ws.Cells(row, 1).Value = "SUMMARY STATISTICS"
+    ws.Cells(row, 1).Font.Bold = True
+    ws.Cells(row + 1, 1).Value = "Total RICs:"
+    ws.Cells(row + 1, 2).Value = lastRow - 1
+    ws.Cells(row + 2, 1).Value = "Processed:"
+    ws.Cells(row + 2, 2).Value = totalProcessed
+    ws.Cells(row + 3, 1).Value = "Successful:"
+    ws.Cells(row + 3, 2).Value = totalSuccess
+    ws.Cells(row + 4, 1).Value = "Errors:"
+    ws.Cells(row + 4, 2).Value = totalErrors
+    ws.Cells(row + 5, 1).Value = "Success Rate:"
+    If totalProcessed > 0 Then
+        ws.Cells(row + 5, 2).Value = totalSuccess / totalProcessed
+        ws.Cells(row + 5, 2).NumberFormat = "0.0%"
+    End If
+
+    ' --- IV Validation Breakdown ---
+    row = row + 7
+    ws.Cells(row, 1).Value = "IV VALIDATION BREAKDOWN"
+    ws.Cells(row, 1).Font.Bold = True
+    row = row + 1
+    ws.Cells(row, 1).Value = "Category"
+    ws.Cells(row, 2).Value = "Count"
+    ws.Cells(row, 3).Value = "Pct"
+    ws.Range(ws.Cells(row, 1), ws.Cells(row, 3)).Font.Bold = True
+
+    Dim ivKey As Variant
+    Dim ivTotal As Long
+    For Each ivKey In ivCounts.Keys
+        ivTotal = ivTotal + CLng(ivCounts(ivKey))
+    Next ivKey
+
+    For Each ivKey In ivCounts.Keys
+        row = row + 1
+        ws.Cells(row, 1).Value = CStr(ivKey)
+        ws.Cells(row, 2).Value = ivCounts(ivKey)
+        If ivTotal > 0 Then
+            ws.Cells(row, 3).Value = CLng(ivCounts(ivKey)) / ivTotal
+            ws.Cells(row, 3).NumberFormat = "0.0%"
+        End If
+    Next ivKey
+
+    ' --- Maturity Coverage ---
+    row = row + 2
+    ws.Cells(row, 1).Value = "MATURITY COVERAGE (by year-month)"
+    ws.Cells(row, 1).Font.Bold = True
+    row = row + 1
+    ws.Cells(row, 1).Value = "Year-Month"
+    ws.Cells(row, 2).Value = "Total"
+    ws.Cells(row, 3).Value = "Success"
+    ws.Cells(row, 4).Value = "Errors"
+    ws.Cells(row, 5).Value = "Success%"
+    ws.Range(ws.Cells(row, 1), ws.Cells(row, 5)).Font.Bold = True
+
+    If maturityCounts.count > 0 Then
+        ' Copy keys to array and sort (yyyy-mm strings sort chronologically)
+        Dim sortedKeys() As String
+        Dim k As Long
+        Dim m As Long, n As Long
+        Dim tmp As String
+        ReDim sortedKeys(1 To maturityCounts.count)
+        k = 1
+        Dim mKey As Variant
+        For Each mKey In maturityCounts.Keys
+            sortedKeys(k) = CStr(mKey)
+            k = k + 1
+        Next mKey
+        For m = 1 To UBound(sortedKeys) - 1
+            For n = m + 1 To UBound(sortedKeys)
+                If sortedKeys(m) > sortedKeys(n) Then
+                    tmp = sortedKeys(m)
+                    sortedKeys(m) = sortedKeys(n)
+                    sortedKeys(n) = tmp
+                End If
+            Next n
+        Next m
+
+        Dim countsArr As Variant
+        For m = 1 To UBound(sortedKeys)
+            row = row + 1
+            countsArr = maturityCounts(sortedKeys(m))
+            ws.Cells(row, 1).Value = sortedKeys(m)
+            ws.Cells(row, 2).Value = countsArr(0)
+            ws.Cells(row, 3).Value = countsArr(1)
+            ws.Cells(row, 4).Value = countsArr(2)
+            If CLng(countsArr(0)) > 0 Then
+                ws.Cells(row, 5).Value = CLng(countsArr(1)) / CLng(countsArr(0))
+                ws.Cells(row, 5).NumberFormat = "0.0%"
+            End If
+        Next m
+    End If
+
+    ws.Columns("A:E").AutoFit
 End Sub
 
 ' Keep remaining helper functions unchanged...
@@ -2938,72 +3161,6 @@ Sub ClearCollectionSheet()
     ws.Columns("D:D").NumberFormat = "yyyy-mm-dd hh:mm:ss"
 End Sub
 
-Sub ClearStagingSheet()
-    Dim ws As Worksheet
-    Dim lastRow As Long
-
-    Set ws = ThisWorkbook.Worksheets(SHEET_STAGING)
-
-    ' Find last row with data
-    lastRow = ws.Cells(ws.Rows.count, 1).End(xlUp).Row
-
-    ' Clear all data rows (keep header row)
-    If lastRow > 1 Then
-        ws.Rows("2:" & lastRow).ClearContents
-    End If
-End Sub
-
-Sub SetupStagingSheet()
-    Dim ws As Worksheet
-    Set ws = ThisWorkbook.Worksheets(SHEET_STAGING)
-
-    ' Set all column headers including new Greeks - matching CSV export requirements
-    ws.Range("A1").Value = "Spot_Date"
-    ws.Range("B1").Value = "Premium"
-    ws.Range("C1").Value = "Ticker"
-    ws.Range("D1").Value = "Maturity"
-    ws.Range("E1").Value = "Interest_rate"
-    ws.Range("F1").Value = "Spot"
-    ws.Range("G1").Value = "Strike"
-    ws.Range("H1").Value = "Type"
-    ws.Range("I1").Value = "Implied_Volatility"
-    ws.Range("J1").Value = "Delta"
-    ws.Range("K1").Value = "Vega"
-    ws.Range("L1").Value = "Gamma"
-    ws.Range("M1").Value = "Theta"
-    ws.Range("N1").Value = "Rho"
-    ws.Range("O1").Value = "Lot_size"
-    ws.Range("P1").Value = "Name"
-    ws.Range("Q1").Value = "Reference"
-    ws.Range("R1").Value = "ccy_pair"
-    ws.Range("S1").Value = "Internal_ID"
-    ws.Range("T1").Value = "Dividend"
-    ws.Range("U1").Value = "DDELTA/DVOL"
-    ws.Range("V1").Value = "DDELTA/DVOLDVOL"
-    ws.Range("W1").Value = "DDELTA/DTIME"
-    ws.Range("X1").Value = "DGAMMA/DSPOT"
-    ws.Range("Y1").Value = "DGAMMA/DVOL"
-    ws.Range("Z1").Value = "DVEGA/DVOL"
-    ws.Range("AA1").Value = "DVEGA/DVOLDVOL"
-    ws.Range("AB1").Value = "RIC"  ' RIC used for download
-    ws.Range("AC1").Value = "RIC_Underlying"
-
-    ws.Range("A1:AC1").Font.Bold = True
-
-    ' Format date columns to YYYY-MM-DD hh:mm:ss for CSV export
-    ws.Columns("A:A").NumberFormat = "yyyy-mm-dd hh:mm:ss"  ' Spot_Date
-    ws.Columns("D:D").NumberFormat = "yyyy-mm-dd hh:mm:ss"  ' Maturity
-
-    ' Format numeric columns with sufficient decimal places for full precision
-    ws.Columns("B:B").NumberFormat = "General"   ' Premium
-    ws.Columns("E:E").NumberFormat = "General"   ' Interest_rate
-    ws.Columns("F:F").NumberFormat = "General"   ' Spot
-    ws.Columns("G:G").NumberFormat = "General"   ' Strike
-    ws.Columns("I:N").NumberFormat = "General"   ' Greeks (IV, Delta, Vega, Gamma, Theta, Rho)
-    ws.Columns("T:T").NumberFormat = "General"   ' Dividend
-    ws.Columns("U:AA").NumberFormat = "General"  ' Higher-order Greeks
-End Sub
-
 Sub SetupQualitySheet()
     Dim ws As Worksheet
     Set ws = ThisWorkbook.Worksheets(SHEET_QUALITY)
@@ -3202,141 +3359,6 @@ Private Sub WriteArrayToCSV(data As Variant, filePath As String, Optional header
 End Sub
 
 ' ============================================
-' CSV EXPORT FUNCTIONS
-' ============================================
-
-' Manual CSV export - run from Excel Macros menu or assign to a button
-' Creates a clean final export with simple filename (rootric_yyyymm.csv)
-' Shows completion message with row count and export time
-' For automatic batch saves during processing, see SaveStagingToCSV below
-Sub ExportToCSV()
-    Dim stagingWs As Worksheet
-    Dim csvPath As String
-    Dim fileName As String
-    Dim rowCount As Long
-    Dim colCount As Long
-    Dim data As Variant
-    Dim headers As Variant
-    Dim startTime As Double
-
-    On Error GoTo ErrorHandler
-
-    Set stagingWs = ThisWorkbook.Worksheets(SHEET_STAGING)
-
-    ' Check if staging has data
-    rowCount = stagingWs.Cells(stagingWs.Rows.count, 1).End(xlUp).Row
-    If rowCount <= 1 Then
-        MsgBox "No data to export.", vbExclamation
-        Exit Sub
-    End If
-
-    colCount = stagingWs.Cells(1, stagingWs.Columns.count).End(xlToLeft).Column
-
-    ' Disable Excel features for speed
-    Application.ScreenUpdating = False
-    Application.Calculation = xlCalculationManual
-    Application.EnableEvents = False
-
-    startTime = Timer
-
-    ' Read all data into arrays (single operation - very fast)
-    headers = stagingWs.Range(stagingWs.Cells(1, 1), stagingWs.Cells(1, colCount)).Value
-    data = stagingWs.Range(stagingWs.Cells(2, 1), stagingWs.Cells(rowCount, colCount)).Value
-
-    ' Build filename
-    fileName = g_RootRIC & "_" & Format(Date, "yyyymm") & ".csv"
-    csvPath = ThisWorkbook.Path & "\" & fileName
-
-    ' Write to CSV using fast file I/O
-    WriteArrayToCSV data, csvPath, headers
-
-    ' Re-enable Excel features
-    Application.ScreenUpdating = True
-    Application.Calculation = xlCalculationAutomatic
-    Application.EnableEvents = True
-
-    MsgBox "Data exported to: " & csvPath & vbNewLine & _
-           "Rows: " & (rowCount - 1) & vbNewLine & _
-           "Time: " & Format(Timer - startTime, "0.00") & " seconds", vbInformation
-
-    Exit Sub
-
-ErrorHandler:
-    Application.ScreenUpdating = True
-    Application.Calculation = xlCalculationAutomatic
-    Application.EnableEvents = True
-    MsgBox "Error exporting CSV: " & Err.Description, vbCritical
-End Sub
-
-' Auto-save staging to CSV after each batch (silent, no popup)
-' Uses fast VBA file I/O instead of slow Excel SaveAs
-Sub SaveStagingToCSV(Optional batchNumber As Long = 0)
-    Dim stagingWs As Worksheet
-    Dim csvPath As String
-    Dim fileName As String
-    Dim rowCount As Long
-    Dim colCount As Long
-    Dim data As Variant
-    Dim headers As Variant
-    Dim prevScreenUpdating As Boolean
-    Dim prevCalculation As XlCalculation
-    Dim prevEnableEvents As Boolean
-
-    On Error GoTo ErrorHandler
-
-    Set stagingWs = ThisWorkbook.Worksheets(SHEET_STAGING)
-
-    ' Check if staging has data (more than just header row)
-    rowCount = stagingWs.Cells(stagingWs.Rows.count, 1).End(xlUp).Row
-    If rowCount <= 1 Then Exit Sub
-
-    colCount = stagingWs.Cells(1, stagingWs.Columns.count).End(xlToLeft).Column
-
-    ' Save current Excel state
-    prevScreenUpdating = Application.ScreenUpdating
-    prevCalculation = Application.Calculation
-    prevEnableEvents = Application.EnableEvents
-
-    ' Disable Excel features for speed
-    Application.ScreenUpdating = False
-    Application.Calculation = xlCalculationManual
-    Application.EnableEvents = False
-
-    ' Read all data into arrays (single operation - very fast)
-    headers = stagingWs.Range(stagingWs.Cells(1, 1), stagingWs.Cells(1, colCount)).Value
-    data = stagingWs.Range(stagingWs.Cells(2, 1), stagingWs.Cells(rowCount, colCount)).Value
-
-    ' Build filename with batch number if provided
-    If batchNumber > 0 Then
-        fileName = g_RootRIC & "_" & Format(Date, "yyyymmdd_HHmmss") & "_batch" & batchNumber & ".csv"
-    Else
-        fileName = g_RootRIC & "_" & Format(Date, "yyyymmdd_HHmmss") & ".csv"
-    End If
-
-    csvPath = ThisWorkbook.Path & "\" & fileName
-
-    ' Write to CSV using fast file I/O
-    WriteArrayToCSV data, csvPath, headers
-
-    ' Restore Excel state
-    Application.ScreenUpdating = prevScreenUpdating
-    Application.Calculation = prevCalculation
-    Application.EnableEvents = prevEnableEvents
-
-    ' Log to status bar instead of popup
-    Application.StatusBar = "Auto-saved: " & fileName & " (" & rowCount - 1 & " rows)"
-
-    Exit Sub
-
-ErrorHandler:
-    ' Restore Excel state on error
-    Application.ScreenUpdating = prevScreenUpdating
-    Application.Calculation = prevCalculation
-    Application.EnableEvents = prevEnableEvents
-    Application.StatusBar = "Error saving CSV: " & Err.Description
-End Sub
-
-' ============================================
 ' ADD GREEK FORMULAS TO EXTERNAL SHEET (Batch Processing)
 ' ============================================
 
@@ -3484,7 +3506,7 @@ Private Sub AddGreekFormulasToRange(ws As Worksheet, startRow As Long, endRow As
     rng.FormulaR1C1 = "=IF(OR(RC[-5]="""",RC[-5]=""NA""),""""," & _
         "IFERROR(GBlackScholesNGreeks(""r"",RC8,RC6,RC7,(RC4-RC1)/365,RC5,0,RC[-5]),""NA""))"
 
-    ' Second-order Greeks (U-AB) use CGBlackScholes - matches Staging sheet structure
+    ' Second-order Greeks (U-AB) use CGBlackScholes
     ' Column U (21): DDeltaDVol (Vanna)
     Set rng = ws.Range(ws.Cells(startRow, 21), ws.Cells(endRow, 21))
     rng.FormulaR1C1 = "=IF(OR(RC9="""",RC9=""NA""),""""," & _
