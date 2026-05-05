@@ -168,6 +168,58 @@ def check_month_gaps(df: pd.DataFrame) -> list[str]:
     return errors
 
 
+def check_missing_by_year(df: pd.DataFrame, col: str, date_col: str = "Spot_Date") -> list[str]:
+    """Report missing/non-numeric values in a numeric column, broken down
+    by year of date_col. Useful for spotting whole-year data gaps."""
+    errors = []
+    if col not in df.columns:
+        errors.append(f"[SKIP] {col} column not found")
+        return errors
+    if date_col not in df.columns:
+        errors.append(f"[SKIP] {date_col} column not found - cannot break down by year")
+        return errors
+
+    series = pd.to_numeric(df[col], errors="coerce")
+    is_blank = df[col].isna() | (df[col].astype(str).str.strip() == "")
+    is_missing = series.isna() | is_blank
+
+    n_missing = int(is_missing.sum())
+    total_rows = len(df)
+    if n_missing == 0:
+        errors.append(f"[PASS] {col}: no missing values across {total_rows:,} rows")
+        return errors
+
+    pct = 100 * n_missing / total_rows
+    errors.append(f"[WARN] {col}: {n_missing:,} missing of {total_rows:,} ({pct:.1f}%)")
+
+    dates = pd.to_datetime(df[date_col], errors="coerce")
+    if not dates.notna().any():
+        errors.append(f"       (no valid {date_col} values - cannot break down by year)")
+        return errors
+
+    yearly = pd.DataFrame({
+        "year": dates.dt.year,
+        "missing": is_missing,
+    }).dropna(subset=["year"])
+    grouped = yearly.groupby("year").agg(
+        total=("missing", "count"),
+        missing=("missing", "sum"),
+    )
+    grouped = grouped[grouped["missing"] > 0].sort_index()
+
+    if grouped.empty:
+        return errors
+
+    errors.append(f"       Missing values by {date_col} year (missing / total = pct):")
+    for year, row in grouped.iterrows():
+        m = int(row["missing"])
+        t = int(row["total"])
+        pct_year = 100 * m / t if t > 0 else 0
+        errors.append(f"         {int(year)}: {m:>10,} / {t:>10,} = {pct_year:5.1f}%")
+
+    return errors
+
+
 def check_maturity_month_gaps(df: pd.DataFrame) -> list[str]:
     """Detect missing months in Maturity between the first and last maturity date."""
     errors = []
@@ -316,6 +368,10 @@ def run_validation(filepath: str, iv_max: float, spot_min: float, spot_max: floa
          check_duplicates(df)),
         ("11. Type Values",
          check_type_values(df)),
+        ("12. Interest Rate Missing by Year",
+         check_missing_by_year(df, "Interest_rate")),
+        ("13. Implied Volatility Missing by Year",
+         check_missing_by_year(df, "Implied_Volatility")),
     ]
 
     fail_count = 0

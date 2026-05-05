@@ -692,6 +692,19 @@ Sub MainDownloadProcess()
         Exit Sub
     End If
 
+    ' Verify the date axis in column A of Future et co covers the option
+    ' download range — RFR and spot VLOOKUPs depend on these dates.
+    Application.StatusBar = "Checking date range in Future et co column A..."
+    Dim dateRangeError As String
+    If Not CheckUnderlyingDateRange(dateRangeError) Then
+        MsgBox "Date range mismatch in 'Future et co' column A:" & vbNewLine & vbNewLine & _
+               dateRangeError & vbNewLine & vbNewLine & _
+               "Run RefreshFutureUnderlyings with the correct UnderlyingStartDate / UnderlyingEndDate first.", _
+               vbExclamation, "Underlying Date Range Mismatch"
+        Application.StatusBar = False
+        Exit Sub
+    End If
+
     totalRICs = CountUnprocessedRICs()
 
     ' Show summary
@@ -2213,6 +2226,72 @@ Function CheckUnderlyingsHaveData(ByRef missingList As String) As Boolean
     Next underlying
 
     CheckUnderlyingsHaveData = (missingList = "")
+End Function
+
+' Verify that column A of Future et co covers [g_DateStart, min(g_DateEnd, today)].
+' RFR and spot VLOOKUPs use this column as the date key, so any gap leaves
+' option rows without a rate or spot price. Returns False with a message
+' describing exactly what's wrong.
+Function CheckUnderlyingDateRange(ByRef errorMsg As String) As Boolean
+    Const DATE_FIRST_ROW As Long = 11
+
+    Dim wsFuture As Worksheet
+    Dim firstDate As Variant
+    Dim lastDate As Variant
+    Dim lastDateRow As Long
+    Dim requiredEnd As Date
+
+    Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
+
+    ' First date is hardcoded at row 11 of column A
+    firstDate = wsFuture.Cells(DATE_FIRST_ROW, 1).Value
+
+    ' Find the last populated row in column A
+    lastDateRow = wsFuture.Cells(wsFuture.Rows.count, 1).End(xlUp).Row
+
+    If lastDateRow < DATE_FIRST_ROW Or Not IsDate(firstDate) Then
+        errorMsg = "No dates found in column A starting at row " & DATE_FIRST_ROW & "." & vbNewLine & _
+                   "The date axis is empty - underlyings have never been refreshed."
+        CheckUnderlyingDateRange = False
+        Exit Function
+    End If
+
+    lastDate = wsFuture.Cells(lastDateRow, 1).Value
+
+    If Not IsDate(lastDate) Then
+        errorMsg = "Last value in column A row " & lastDateRow & " is not a valid date: '" & lastDate & "'."
+        CheckUnderlyingDateRange = False
+        Exit Function
+    End If
+
+    ' Required end of underlying data: the option end date, capped at today
+    ' (no historical data exists for future dates).
+    If g_DateEnd > Date Then
+        requiredEnd = Date
+    Else
+        requiredEnd = g_DateEnd
+    End If
+
+    ' Underlying must START on or before the option start date
+    If CDate(firstDate) > g_DateStart Then
+        errorMsg = "First date in Future et co column A is " & Format(firstDate, "yyyy-mm-dd") & _
+                   ", which is AFTER the option start date " & Format(g_DateStart, "yyyy-mm-dd") & "." & vbNewLine & _
+                   "Move UnderlyingStartDate to " & Format(g_DateStart, "yyyy-mm-dd") & " (or earlier) and re-refresh."
+        CheckUnderlyingDateRange = False
+        Exit Function
+    End If
+
+    ' Underlying must END on or after the required end date
+    If CDate(lastDate) < requiredEnd Then
+        errorMsg = "Last date in Future et co column A is " & Format(lastDate, "yyyy-mm-dd") & _
+                   ", which is BEFORE the required end date " & Format(requiredEnd, "yyyy-mm-dd") & "." & vbNewLine & _
+                   "Move UnderlyingEndDate to " & Format(requiredEnd, "yyyy-mm-dd") & " (or later) and re-refresh."
+        CheckUnderlyingDateRange = False
+        Exit Function
+    End If
+
+    errorMsg = ""
+    CheckUnderlyingDateRange = True
 End Function
 
 Function CountUnprocessedRICs() As Long
