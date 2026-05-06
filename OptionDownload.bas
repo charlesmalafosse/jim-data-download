@@ -303,6 +303,10 @@ Sub RefreshFutureUnderlyings()
     dateFirstRow = 11       ' Row 11 = first date (hardcoded value)
     formulaTemplateRow = 12 ' Row 12 = expandable formulas (e.g. =WORKDAY(A11,1))
 
+    ' Workbook may be in manual calc mode — force a recalculation so any
+    ' formula-driven UnderlyingStartDate/EndDate cells return current values.
+    Application.Calculate
+
     On Error Resume Next
     dtStart = wsFuture.Range(RANGE_UNDERLYING_START_DATE).Value
     dtEnd = wsFuture.Range(RANGE_UNDERLYING_END_DATE).Value
@@ -558,6 +562,9 @@ Sub TrimRateRanges(wsFuture As Worksheet)
 
     dateFirstRow = 11
     formulaTemplateRow = 12
+
+    ' Force calc in case the workbook is in manual mode (formula-driven date cells)
+    Application.Calculate
 
     On Error Resume Next
     dtStart = wsFuture.Range(RANGE_UNDERLYING_START_DATE).Value
@@ -2242,6 +2249,10 @@ Function CheckUnderlyingDateRange(ByRef errorMsg As String) As Boolean
     Dim requiredEnd As Date
 
     Set wsFuture = ThisWorkbook.Worksheets(SHEET_FUTURE)
+
+    ' Force calc — workbook may be in manual mode, and column A is filled
+    ' with WORKDAY formulas whose cached values may be stale.
+    Application.Calculate
 
     ' First date is hardcoded at row 11 of column A
     firstDate = wsFuture.Cells(DATE_FIRST_ROW, 1).Value
