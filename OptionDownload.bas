@@ -432,6 +432,10 @@ Sub RefreshFutureUnderlyings()
         currentCol = currentCol + 3
     Next i
 
+    ' Step 5b: Clear stale data below row 11 in every rate named range so the
+    ' LSEG spill has a clean canvas — prevents #SPILL! errors and stale tail rows.
+    ClearRateRangeDataRows wsFuture
+
     ' Store state for async completion
     Set g_FutureSheet = wsFuture
     g_FutureRefreshStartTime = Timer
@@ -530,6 +534,8 @@ Sub RefreshFutureUnderlyings_Complete()
 
     On Error Resume Next
 
+    ' First calc: ensure LSEG formulas have settled (col A WORKDAYs, col B-AF
+    ' templates, rate-range LSEG cols) before TrimRateRanges reads any row counts.
     g_FutureSheet.Calculate
     DoEvents
 
@@ -538,6 +544,12 @@ Sub RefreshFutureUnderlyings_Complete()
     ' Columns 1-2 are LSEG-populated; column 3 is an expansion formula.
     TrimRateRanges g_FutureSheet
 
+    ' Second calc: TrimRateRanges autofilled col-3 expansion formulas — those
+    ' new cells are dirty but unevaluated under manual calc mode. Recalc so
+    ' the sheet shows their computed values, not blank.
+    g_FutureSheet.Calculate
+    DoEvents
+
     Application.StatusBar = False
 
     MsgBox "Added " & g_FutureUnderlyingCount & " underlyings to " & SHEET_FUTURE & " in alphabetical order." & vbNewLine & _
@@ -545,27 +557,72 @@ Sub RefreshFutureUnderlyings_Complete()
            "IMPORTANT: Add Bloomberg equivalent for underlying RICs in RicBloomberg range.", vbInformation
 End Sub
 
+Sub ClearRateRangeDataRows(wsFuture As Worksheet)
+    ' Clear all rows below the template row of each rate named range so the
+    ' LSEG spill has a clean canvas to fill. Preserves row 11 (the templates:
+    ' LSEG formulas in cols 1-2, expansion formula in col 3).
+    Dim rateRangeNames As Variant
+    Dim rateRng As Range
+    Dim rateCol As Long, rateRow As Long
+    Dim col1Last As Long, col2Last As Long, col3Last As Long
+    Dim maxLast As Long
+
+    rateRangeNames = Array("RatesUSD", "RatesUSD6m", "RatesUSD1y", "RatesUSD2y", _
+                           "RatesEUR", "RatesEUR3m", "RatesEUR6m", "RatesEUR1y", "RatesGBP")
+
+    Application.StatusBar = "Clearing rate ranges below template row..."
+
+    Dim rn As Variant
+    For Each rn In rateRangeNames
+        Set rateRng = Nothing
+        On Error Resume Next
+        Set rateRng = wsFuture.Range(CStr(rn))
+        On Error GoTo 0
+        If rateRng Is Nothing Then GoTo NextRange
+
+        rateCol = rateRng.Column
+        rateRow = rateRng.Row
+
+        ' Find the deepest used row across the 3 columns of this range
+        col1Last = wsFuture.Cells(wsFuture.Rows.count, rateCol).End(xlUp).Row
+        col2Last = wsFuture.Cells(wsFuture.Rows.count, rateCol + 1).End(xlUp).Row
+        col3Last = wsFuture.Cells(wsFuture.Rows.count, rateCol + 2).End(xlUp).Row
+        maxLast = col1Last
+        If col2Last > maxLast Then maxLast = col2Last
+        If col3Last > maxLast Then maxLast = col3Last
+
+        ' Clear from rateRow + 1 (one row below the template) down to the deepest used row
+        If maxLast > rateRow Then
+            wsFuture.Range(wsFuture.Cells(rateRow + 1, rateCol), _
+                          wsFuture.Cells(maxLast, rateCol + 2)).ClearContents
+        End If
+NextRange:
+    Next rn
+End Sub
+
 Sub TrimRateRanges(wsFuture As Worksheet)
+    ' For each rate named range (3-column block: LSEG date, LSEG value, expansion formula),
+    ' expand col 3 to cover the col-A date axis (targetLastRow) by default. Only trim
+    ' back to LSEG's actual data extent when LSEG clearly returned fewer rows than the
+    ' date range — never under-extend just because LSEG hasn't fully populated yet.
+    '
+    ' The "template" cell for col 3's expansion formula sits at the SAME row as the
+    ' named range itself (row 11). Autofill is sourced from that row.
     Dim rateRangeNames As Variant
     Dim rateRng As Range
     Dim rateCol As Long
-    Dim rateLastRow As Long
-    Dim rateRC As Long
-    Dim rateRL As Long
+    Dim rateRow As Long
+    Dim lsegCol1Last As Long
+    Dim lsegCol2Last As Long
+    Dim lsegLastRow As Long
+    Dim col3CurrentLast As Long
+    Dim col3EndRow As Long
     Dim targetLastRow As Long
     Dim dtStart As Date
     Dim dtEnd As Date
     Dim effectiveEnd As Date
-    Dim numDays As Long
-    Dim dateFirstRow As Long
-    Dim formulaTemplateRow As Long
 
-    dateFirstRow = 11
-    formulaTemplateRow = 12
-
-    ' Force calc in case the workbook is in manual mode (formula-driven date cells)
-    Application.Calculate
-
+    ' Compute targetLastRow from the date axis named ranges (same as Step 3b)
     On Error Resume Next
     dtStart = wsFuture.Range(RANGE_UNDERLYING_START_DATE).Value
     dtEnd = wsFuture.Range(RANGE_UNDERLYING_END_DATE).Value
@@ -579,13 +636,12 @@ Sub TrimRateRanges(wsFuture As Worksheet)
         effectiveEnd = dtEnd
     End If
 
-    numDays = Application.WorksheetFunction.NetworkDays(dtStart, effectiveEnd) + 5
-    targetLastRow = dateFirstRow + numDays
+    targetLastRow = 11 + Application.WorksheetFunction.NetworkDays(dtStart, effectiveEnd) + 5
 
     rateRangeNames = Array("RatesUSD", "RatesUSD6m", "RatesUSD1y", "RatesUSD2y", _
                            "RatesEUR", "RatesEUR3m", "RatesEUR6m", "RatesEUR1y", "RatesGBP")
 
-    Application.StatusBar = "Trimming rate ranges to " & targetLastRow & " rows..."
+    Application.StatusBar = "Aligning rate-range expansion formulas..."
 
     Dim rn As Variant
     For Each rn In rateRangeNames
@@ -594,31 +650,49 @@ Sub TrimRateRanges(wsFuture As Worksheet)
         Set rateRng = wsFuture.Range(CStr(rn))
         On Error GoTo 0
 
-        If Not rateRng Is Nothing Then
-            rateCol = rateRng.Column
+        If rateRng Is Nothing Then GoTo NextRange
 
-            ' Find last used row across the 3 columns of this range
-            rateLastRow = 0
-            For rateRC = rateCol To rateCol + 2
-                rateRL = wsFuture.Cells(wsFuture.Rows.count, rateRC).End(xlUp).Row
-                If rateRL > rateLastRow Then rateLastRow = rateRL
-            Next rateRC
+        rateCol = rateRng.Column
+        rateRow = rateRng.Row    ' Template row (= row of the named range, e.g., row 11)
 
-            ' Clear excess rows beyond target
-            If rateLastRow > targetLastRow Then
-                wsFuture.Range(wsFuture.Cells(targetLastRow + 1, rateCol), _
-                              wsFuture.Cells(rateLastRow, rateCol + 2)).ClearContents
-            End If
-
-            ' AutoFill the expansion formula (col 3) from template row down
-            If targetLastRow > formulaTemplateRow Then
-                If Not IsEmpty(wsFuture.Cells(formulaTemplateRow, rateCol + 2).Value) Then
-                    wsFuture.Cells(formulaTemplateRow, rateCol + 2).AutoFill _
-                        Destination:=wsFuture.Range(wsFuture.Cells(formulaTemplateRow, rateCol + 2), _
-                                                   wsFuture.Cells(targetLastRow, rateCol + 2))
-                End If
-            End If
+        ' Inspect LSEG's data extent across both data columns; spill may show
+        ' on either, so take the larger.
+        lsegCol1Last = wsFuture.Cells(wsFuture.Rows.count, rateCol).End(xlUp).Row
+        lsegCol2Last = wsFuture.Cells(wsFuture.Rows.count, rateCol + 1).End(xlUp).Row
+        If lsegCol1Last > lsegCol2Last Then
+            lsegLastRow = lsegCol1Last
+        Else
+            lsegLastRow = lsegCol2Last
         End If
+
+        ' Decide where col 3 should end:
+        '   - Default: targetLastRow (col A axis) so the 3rd column always
+        '     visually matches the date range.
+        '   - Trim back only when LSEG clearly returned fewer rows: requires
+        '     lsegLastRow > rateRow + 5 (a sanity guard so a not-yet-populated
+        '     LSEG range doesn't truncate the formula).
+        If lsegLastRow > rateRow + 5 And lsegLastRow < targetLastRow Then
+            col3EndRow = lsegLastRow
+        Else
+            col3EndRow = targetLastRow
+        End If
+
+        ' Clear col 3 beyond col3EndRow (whatever a previous run left behind).
+        col3CurrentLast = wsFuture.Cells(wsFuture.Rows.count, rateCol + 2).End(xlUp).Row
+        If col3CurrentLast > col3EndRow Then
+            wsFuture.Range(wsFuture.Cells(col3EndRow + 1, rateCol + 2), _
+                          wsFuture.Cells(col3CurrentLast, rateCol + 2)).ClearContents
+        End If
+
+        ' Extend col 3's expansion formula from the template row (rateRow) down
+        ' to col3EndRow. Autofill source is the named-range row itself.
+        If col3EndRow > rateRow And _
+           Not IsEmpty(wsFuture.Cells(rateRow, rateCol + 2).Value) Then
+            wsFuture.Cells(rateRow, rateCol + 2).AutoFill _
+                Destination:=wsFuture.Range(wsFuture.Cells(rateRow, rateCol + 2), _
+                                           wsFuture.Cells(col3EndRow, rateCol + 2))
+        End If
+NextRange:
     Next rn
 End Sub
 
