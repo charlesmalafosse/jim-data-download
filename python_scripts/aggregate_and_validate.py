@@ -17,6 +17,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -67,6 +68,37 @@ CRITICAL_COLUMNS = [
     "Spot_Date", "Ticker", "Maturity", "Spot", "Strike", "Type",
     "Implied_Volatility", "Premium", "Reference",
 ]
+
+# Date columns that may contain Excel date serials (legacy VBA bug) instead of
+# date strings. fix_excel_date_serials() scans these and converts numeric
+# values in [EXCEL_SERIAL_MIN, EXCEL_SERIAL_MAX] to "YYYY-MM-DD HH:MM:SS".
+EXCEL_DATE_COLUMNS = ["Spot_Date", "Maturity"]
+EXCEL_SERIAL_MIN = 25569   # 1970-01-01
+EXCEL_SERIAL_MAX = 73050   # 2099-12-31
+EXCEL_DATE_ORIGIN = pd.Timestamp("1899-12-30")  # accounts for 1900 leap-year bug
+
+# Futures month codes: F=Jan G=Feb H=Mar J=Apr K=May M=Jun
+#                     N=Jul Q=Aug U=Sep V=Oct X=Nov Z=Dec
+_MONTH_CODE_RE = re.compile(r"([FGHJKMNQUVXZ])(\d{1,2})$")
+
+
+def extract_futures_month_code(symbol) -> str | None:
+    """Return the month-code letter (F..Z) from a futures-style symbol such as
+    'LCOZ6' (LSEG RIC), 'LCOZ6^Z26' (expired LSEG RIC) or 'COZ6 Comdty'
+    (Bloomberg ticker), regardless of root-ticker length. The expired-RIC
+    '^MMYY' suffix is stripped first so the underlying contract month is the
+    one returned, not the suffix's call-month code. Returns None for
+    continuous contracts or unparseable inputs."""
+    if not isinstance(symbol, str):
+        return None
+    head = symbol.strip().split(None, 1)[0]
+    caret = head.find("^")
+    if caret >= 0:
+        head = head[:caret]
+    if not head:
+        return None
+    m = _MONTH_CODE_RE.search(head)
+    return m.group(1) if m else None
 
 
 # ============================================================================
@@ -234,6 +266,28 @@ def parse_filter_args(filter_strs: list[str]) -> dict:
     return filters
 
 
+def fix_excel_date_serials(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Detect Excel date serials (e.g. '46234') in date columns and rewrite
+    them as 'YYYY-MM-DD HH:MM:SS' strings. Already-formatted dates and
+    non-date values pass through unchanged.
+
+    Legacy bug fix: an older VBA version saved date columns as Excel serial
+    numbers instead of formatted strings. This function repairs those CSVs
+    on the fly so aggregation/validation produce correct results."""
+    for col in columns:
+        if col not in df.columns:
+            continue
+        numeric = pd.to_numeric(df[col], errors="coerce")
+        is_serial = numeric.between(EXCEL_SERIAL_MIN, EXCEL_SERIAL_MAX)
+        n = int(is_serial.sum())
+        if n == 0:
+            continue
+        dates = EXCEL_DATE_ORIGIN + pd.to_timedelta(numeric[is_serial], unit="D")
+        df.loc[is_serial, col] = dates.dt.strftime("%Y-%m-%d %H:%M:%S").values
+        print(f"  Fixed {n:,} Excel date serials in {col}")
+    return df
+
+
 def run_aggregate(args) -> str:
     """Run aggregation pipeline. Returns the output file path."""
     files = find_csv_files(args.input_dir, args.pattern)
@@ -249,6 +303,9 @@ def run_aggregate(args) -> str:
     if df.empty:
         print("No data to aggregate")
         sys.exit(1)
+
+    print("\nFixing Excel date serials (if any)...")
+    df = fix_excel_date_serials(df, EXCEL_DATE_COLUMNS)
 
     overrides = {}
     if args.override_file:
@@ -310,7 +367,10 @@ def load_file(filepath: str) -> pd.DataFrame:
 
 
 def check_month_code_mismatch(df: pd.DataFrame) -> list[str]:
-    """Check that the 3rd letter of RIC_Underlying matches the 3rd letter of Reference."""
+    """Check that the futures month code (F,G,H,J,K,M,N,Q,U,V,X,Z) matches
+    between RIC_Underlying and Reference (Bloomberg ticker), independent of
+    root-ticker length. Rows with no parseable month code on either side
+    are skipped (e.g. continuous contracts)."""
     errors = []
     if "RIC_Underlying" not in df.columns:
         errors.append("[SKIP] RIC_Underlying column not found - cannot check month code")
@@ -320,30 +380,45 @@ def check_month_code_mismatch(df: pd.DataFrame) -> list[str]:
         return errors
 
     sub = df[["RIC_Underlying", "Reference"]].dropna()
-    mask = (sub["RIC_Underlying"].str.len() >= 3) & (sub["Reference"].str.len() >= 3)
-    sub = sub[mask]
-
     if sub.empty:
-        errors.append("[SKIP] No rows with long enough RIC_Underlying and Reference to compare")
+        errors.append("[SKIP] No rows with both RIC_Underlying and Reference")
         return errors
 
-    mismatch = sub[sub["RIC_Underlying"].str[2] != sub["Reference"].str[2]]
-    if len(mismatch) > 0:
-        n = len(mismatch)
-        sample = mismatch.head(5)
+    ric_codes = sub["RIC_Underlying"].apply(extract_futures_month_code)
+    ref_codes = sub["Reference"].apply(extract_futures_month_code)
+
+    parseable = ric_codes.notna() & ref_codes.notna()
+    n_unparseable = int((~parseable).sum())
+    if n_unparseable:
         errors.append(
-            f"[FAIL] {n} rows have month-code mismatch (3rd letter) "
-            f"between RIC_Underlying and Reference"
+            f"[INFO] {n_unparseable} row(s) skipped - month code not extractable"
         )
-        for idx, row in sample.iterrows():
+
+    sub = sub[parseable]
+    rc = ric_codes[parseable]
+    bc = ref_codes[parseable]
+
+    if sub.empty:
+        errors.append("[SKIP] No rows with extractable month codes on both sides")
+        return errors
+
+    mismatch_mask = rc != bc
+    n = int(mismatch_mask.sum())
+    if n > 0:
+        sample_idx = sub[mismatch_mask].head(5).index
+        errors.append(
+            f"[FAIL] {n} rows have month-code mismatch between RIC_Underlying and Reference"
+        )
+        for idx in sample_idx:
             errors.append(
-                f"       Row {idx}: RIC_Underlying='{row['RIC_Underlying']}' "
-                f"Reference='{row['Reference']}'"
+                f"       Row {idx}: RIC_Underlying='{sub.loc[idx, 'RIC_Underlying']}' "
+                f"(code={rc.loc[idx]}) vs Reference='{sub.loc[idx, 'Reference']}' "
+                f"(code={bc.loc[idx]})"
             )
         if n > 5:
             errors.append(f"       ... and {n - 5} more")
     else:
-        errors.append(f"[PASS] Month code (3rd letter) matches on all {len(sub)} checked rows")
+        errors.append(f"[PASS] Month code matches on all {len(sub)} checked rows")
 
     return errors
 
@@ -594,6 +669,9 @@ def check_type_values(df: pd.DataFrame) -> list[str]:
 def run_validation(filepath: str, iv_max: float, spot_min: float, spot_max: float) -> int:
     """Run all checks and print report. Returns FAIL count."""
     df = load_file(filepath)
+
+    # Repair legacy Excel date serials before running date-aware checks
+    df = fix_excel_date_serials(df, EXCEL_DATE_COLUMNS)
 
     print("=" * 70)
     print("VALIDATION REPORT")

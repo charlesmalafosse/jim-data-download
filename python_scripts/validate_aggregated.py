@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import re
 import sys
 
 import pandas as pd
@@ -31,6 +32,29 @@ CRITICAL_COLUMNS = [
 ]
 
 KEY_COLUMNS = ["Spot_Date", "Ticker", "Maturity", "Strike", "Type"]
+
+# Futures month codes: F=Jan G=Feb H=Mar J=Apr K=May M=Jun
+#                     N=Jul Q=Aug U=Sep V=Oct X=Nov Z=Dec
+_MONTH_CODE_RE = re.compile(r"([FGHJKMNQUVXZ])(\d{1,2})$")
+
+
+def extract_futures_month_code(symbol) -> str | None:
+    """Return the month-code letter (F..Z) from a futures-style symbol such as
+    'LCOZ6' (LSEG RIC), 'LCOZ6^Z26' (expired LSEG RIC) or 'COZ6 Comdty'
+    (Bloomberg ticker), regardless of root-ticker length. The expired-RIC
+    '^MMYY' suffix is stripped first so the underlying contract month is the
+    one returned, not the suffix's call-month code. Returns None for
+    continuous contracts or unparseable inputs."""
+    if not isinstance(symbol, str):
+        return None
+    head = symbol.strip().split(None, 1)[0]  # drop ' Comdty', ' Index', etc.
+    caret = head.find("^")
+    if caret >= 0:
+        head = head[:caret]                  # drop expired-RIC suffix
+    if not head:
+        return None
+    m = _MONTH_CODE_RE.search(head)
+    return m.group(1) if m else None
 
 
 def load_file(filepath: str) -> pd.DataFrame:
@@ -46,7 +70,10 @@ def load_file(filepath: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def check_month_code_mismatch(df: pd.DataFrame) -> list[str]:
-    """Check that the 3rd letter of RIC_Underlying matches the 3rd letter of Reference."""
+    """Check that the futures month code (F,G,H,J,K,M,N,Q,U,V,X,Z) matches
+    between RIC_Underlying and Reference (Bloomberg ticker), independent of
+    root-ticker length. Rows with no parseable month code on either side
+    are skipped (e.g. continuous contracts)."""
     errors = []
     if "RIC_Underlying" not in df.columns:
         errors.append("[SKIP] RIC_Underlying column not found - cannot check month code")
@@ -56,31 +83,45 @@ def check_month_code_mismatch(df: pd.DataFrame) -> list[str]:
         return errors
 
     sub = df[["RIC_Underlying", "Reference"]].dropna()
-    # Only check rows where both values are long enough
-    mask = (sub["RIC_Underlying"].str.len() >= 3) & (sub["Reference"].str.len() >= 3)
-    sub = sub[mask]
-
     if sub.empty:
-        errors.append("[SKIP] No rows with long enough RIC_Underlying and Reference to compare")
+        errors.append("[SKIP] No rows with both RIC_Underlying and Reference")
         return errors
 
-    mismatch = sub[sub["RIC_Underlying"].str[2] != sub["Reference"].str[2]]
-    if len(mismatch) > 0:
-        n = len(mismatch)
-        sample = mismatch.head(5)
+    ric_codes = sub["RIC_Underlying"].apply(extract_futures_month_code)
+    ref_codes = sub["Reference"].apply(extract_futures_month_code)
+
+    parseable = ric_codes.notna() & ref_codes.notna()
+    n_unparseable = int((~parseable).sum())
+    if n_unparseable:
         errors.append(
-            f"[FAIL] {n} rows have month-code mismatch (3rd letter) "
-            f"between RIC_Underlying and Reference"
+            f"[INFO] {n_unparseable} row(s) skipped - month code not extractable"
         )
-        for idx, row in sample.iterrows():
+
+    sub = sub[parseable]
+    rc = ric_codes[parseable]
+    bc = ref_codes[parseable]
+
+    if sub.empty:
+        errors.append("[SKIP] No rows with extractable month codes on both sides")
+        return errors
+
+    mismatch_mask = rc != bc
+    n = int(mismatch_mask.sum())
+    if n > 0:
+        sample_idx = sub[mismatch_mask].head(5).index
+        errors.append(
+            f"[FAIL] {n} rows have month-code mismatch between RIC_Underlying and Reference"
+        )
+        for idx in sample_idx:
             errors.append(
-                f"       Row {idx}: RIC_Underlying='{row['RIC_Underlying']}' "
-                f"Reference='{row['Reference']}'"
+                f"       Row {idx}: RIC_Underlying='{sub.loc[idx, 'RIC_Underlying']}' "
+                f"(code={rc.loc[idx]}) vs Reference='{sub.loc[idx, 'Reference']}' "
+                f"(code={bc.loc[idx]})"
             )
         if n > 5:
             errors.append(f"       ... and {n - 5} more")
     else:
-        errors.append(f"[PASS] Month code (3rd letter) matches on all {len(sub)} checked rows")
+        errors.append(f"[PASS] Month code matches on all {len(sub)} checked rows")
 
     return errors
 

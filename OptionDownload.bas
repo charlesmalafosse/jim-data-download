@@ -1859,10 +1859,21 @@ Sub BuildAndAppendBatchRows(ws As Worksheet, startRow As Long, maxRows As Long)
         If Not IsEmpty(srcData(i, 1)) And Not IsError(srcData(i, 1)) And _
            Not IsEmpty(srcData(i, 2)) And Not IsError(srcData(i, 2)) And IsNumeric(srcData(i, 2)) Then
             destIdx = destIdx + 1
-            destData(destIdx, 1) = srcData(i, 1)    ' Spot_Date (col 1)
+            ' Spot_Date / Maturity: .Value2 returns Doubles (date serials like 46234)
+            ' for date-formatted cells. Cast to Date so FormatCSVField writes them
+            ' as "yyyy-mm-dd hh:mm:ss" rather than "46234".
+            If IsNumeric(srcData(i, 1)) Then
+                destData(destIdx, 1) = CDate(srcData(i, 1))    ' Spot_Date (col 1)
+            Else
+                destData(destIdx, 1) = srcData(i, 1)
+            End If
             destData(destIdx, 2) = srcData(i, 2)    ' Premium (col 2)
             destData(destIdx, 3) = srcData(i, 3)    ' Ticker (col 3)
-            destData(destIdx, 4) = srcData(i, 4)    ' Maturity (col 4)
+            If IsNumeric(srcData(i, 4)) Then
+                destData(destIdx, 4) = CDate(srcData(i, 4))    ' Maturity (col 4)
+            Else
+                destData(destIdx, 4) = srcData(i, 4)
+            End If
             destData(destIdx, 5) = srcData(i, 5)    ' Interest_rate (col 5)
             destData(destIdx, 6) = srcData(i, 6)    ' Spot (col 6)
             destData(destIdx, 7) = srcData(i, 7)    ' Strike (col 7)
@@ -2939,6 +2950,197 @@ Sub RetryFailedRICsInBatch(wsCollection As Worksheet, batchStartRow As Long, bat
 
     Application.StatusBar = "Retry complete: " & successCount & " of " & retryCount & " succeeded"
 End Sub
+
+' ============================================
+' Bulk-add expired suffix over a maturity range
+' ============================================
+
+Public Sub AddExpiredSuffixForMaturityRange()
+    ' Append ^MMYY expired suffix to all RICs in RIC_List whose Maturity falls
+    ' within a user-selected [start, end] range. RICs that already have a
+    ' suffix are left untouched.
+    Dim wsRIC As Worksheet
+    Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
+
+    Dim sortedDates() As Date
+    Dim n As Long
+    n = CollectUniqueMaturities(wsRIC, sortedDates)
+    If n = 0 Then
+        MsgBox "No maturities found in RIC_List column B.", vbExclamation
+        Exit Sub
+    End If
+
+    Dim listText As String
+    listText = BuildMaturityListText(sortedDates, n)
+
+    Dim startDate As Date, endDate As Date
+    If Not PromptForMaturity("start", listText, sortedDates, n, startDate) Then Exit Sub
+    If Not PromptForMaturity("end", listText, sortedDates, n, endDate) Then Exit Sub
+
+    If endDate < startDate Then
+        Dim tmpDate As Date
+        tmpDate = startDate
+        startDate = endDate
+        endDate = tmpDate
+    End If
+
+    Dim updated As Long
+    updated = ApplyExpiredSuffixToRange(wsRIC, startDate, endDate)
+
+    MsgBox "Expired suffix added to " & updated & " RIC(s) " & _
+           "between " & Format(startDate, "yyyy-mm-dd") & " and " & _
+           Format(endDate, "yyyy-mm-dd") & ".", vbInformation
+End Sub
+
+Private Function CollectUniqueMaturities(wsRIC As Worksheet, ByRef sortedDates() As Date) As Long
+    Dim lastRow As Long
+    lastRow = wsRIC.Cells(wsRIC.Rows.count, 2).End(xlUp).Row
+    If lastRow < 2 Then
+        ReDim sortedDates(0 To 0)
+        CollectUniqueMaturities = 0
+        Exit Function
+    End If
+
+    Dim dict As Object
+    Set dict = CreateObject("Scripting.Dictionary")
+
+    Dim i As Long, v As Variant, key As String
+    For i = 2 To lastRow
+        v = wsRIC.Cells(i, 2).Value
+        If IsDate(v) Then
+            key = Format(CDate(v), "yyyy-mm-dd")
+            If Not dict.Exists(key) Then dict.Add key, CDate(v)
+        End If
+    Next i
+
+    Dim count As Long
+    count = dict.count
+    If count = 0 Then
+        ReDim sortedDates(0 To 0)
+        CollectUniqueMaturities = 0
+        Exit Function
+    End If
+
+    ReDim sortedDates(0 To count - 1)
+    Dim k As Variant, idx As Long
+    idx = 0
+    For Each k In dict.Keys
+        sortedDates(idx) = dict(k)
+        idx = idx + 1
+    Next k
+
+    ' Insertion sort (count is small)
+    Dim a As Long, b As Long, tmp As Date
+    For a = 1 To count - 1
+        tmp = sortedDates(a)
+        b = a - 1
+        Do While b >= 0
+            If sortedDates(b) <= tmp Then Exit Do
+            sortedDates(b + 1) = sortedDates(b)
+            b = b - 1
+        Loop
+        sortedDates(b + 1) = tmp
+    Next a
+
+    CollectUniqueMaturities = count
+End Function
+
+Private Function BuildMaturityListText(sortedDates() As Date, n As Long) As String
+    Dim s As String, i As Long
+    For i = 0 To n - 1
+        s = s & (i + 1) & ") " & Format(sortedDates(i), "yyyy-mm-dd") & vbNewLine
+    Next i
+    BuildMaturityListText = s
+End Function
+
+Private Function PromptForMaturity(label As String, listText As String, _
+                                   sortedDates() As Date, n As Long, _
+                                   ByRef result As Date) As Boolean
+    Dim raw As Variant
+    Dim prompt As String
+    prompt = "Pick " & label & " maturity (enter number 1-" & n & " or a date):" & _
+            vbNewLine & vbNewLine & listText
+    raw = Application.InputBox(prompt:=prompt, Title:="Add Expired Suffix - " & label, Type:=2)
+    If VarType(raw) = vbBoolean Then
+        PromptForMaturity = False
+        Exit Function
+    End If
+
+    Dim s As String
+    s = Trim(CStr(raw))
+    If s = "" Then
+        PromptForMaturity = False
+        Exit Function
+    End If
+
+    If IsNumeric(s) Then
+        Dim idx As Long
+        idx = CLng(s)
+        If idx >= 1 And idx <= n Then
+            result = sortedDates(idx - 1)
+            PromptForMaturity = True
+            Exit Function
+        End If
+    End If
+
+    If IsDate(s) Then
+        result = CDate(s)
+        PromptForMaturity = True
+        Exit Function
+    End If
+
+    MsgBox "Could not parse '" & s & "' as an index or a date.", vbExclamation
+    PromptForMaturity = False
+End Function
+
+Private Function ApplyExpiredSuffixToRange(wsRIC As Worksheet, _
+                                           startDate As Date, _
+                                           endDate As Date) As Long
+    Dim lastRow As Long
+    lastRow = wsRIC.Cells(wsRIC.Rows.count, 1).End(xlUp).Row
+    If lastRow < 2 Then Exit Function
+
+    Dim updated As Long
+    Dim i As Long
+    Dim ric As String, newRIC As String
+    Dim maturityDate As Date, maturityMonth As Long
+    Dim yearCode As String, monthCodeCall As String
+    Dim mat As Variant
+
+    Application.ScreenUpdating = False
+    For i = 2 To lastRow
+        ric = CStr(wsRIC.Cells(i, 1).Value)
+        mat = wsRIC.Cells(i, 2).Value
+        If ric = "" Or Not IsDate(mat) Then GoTo NextRow
+
+        maturityDate = CDate(mat)
+        If maturityDate < startDate Or maturityDate > endDate Then GoTo NextRow
+        If HasExpiredRICSuffix(ric) Then GoTo NextRow
+
+        If GetOptionMonthCodeMethod() = "Same Month" Then
+            maturityMonth = Month(maturityDate)
+        Else
+            maturityMonth = Month(maturityDate) + 1
+            If maturityMonth > 12 Then maturityMonth = 1
+        End If
+
+        yearCode = CStr(wsRIC.Cells(i, 6).Value)
+        If yearCode = "n/a" Or yearCode = "" Then yearCode = ExtractYearCodeFromRIC(ric)
+        If Len(yearCode) = 1 Then yearCode = "2" & yearCode
+
+        monthCodeCall = GetMonthCodeCallFromRIC(ric, maturityMonth)
+        newRIC = AddExpiredRICSuffix(ric, monthCodeCall, yearCode)
+
+        If newRIC <> ric Then
+            wsRIC.Cells(i, 1).Value = newRIC
+            updated = updated + 1
+        End If
+NextRow:
+    Next i
+    Application.ScreenUpdating = True
+
+    ApplyExpiredSuffixToRange = updated
+End Function
 
 ' ============================================
 ' Keep remaining helper functions

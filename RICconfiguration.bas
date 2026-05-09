@@ -17,7 +17,9 @@ Public Const WEEKLY_CALL = "weeklyCall"
 Public Const WEEKLY_PUT = "weeklyPut"
 Public Const OPTION_FREQUENCY = "optionFrequency"
 Public Const OPTION_MONTH_CODE_METHOD = "optionMonthCodeMethod"
-Public Const UNDERLYING_MONTH_MODE = "Same Month"  ' "Same Month" or "Quarter End", "Next 2 Month"
+Public Const UNDERLYING_MONTH_MODE_RANGE = "underlyingMonthMode"  ' Config named range
+Public Const UNDERLYING_MONTH_MODE_DEFAULT = "Same Month"          ' Fallback when range not set
+                                                                   ' Valid values: "Same Month", "Quarter End", "Next 2 Month"
 ' DEPRECATED - use strikeMultiplier named range in Config sheet instead
 ' Public Const OPTION_STRIKE_DECIMALS As Integer = 1  ' 1 or 2 decimal places for strike
 Public Const OPTION_YEAR_DIGITS As Integer = 2      ' 1 or 2 year digits
@@ -287,9 +289,11 @@ Function CreateRICInfo(maturityDate As Date, strike As Double, optionType As Str
     ' Get future month code (for underlying RIC/Bloomberg ticker)
     Dim underlyingMonth As Integer
     Dim underlyingYear As Integer
+    Dim underlyingMode As String
     underlyingYear = optionYear ' Year(maturityDate)
+    underlyingMode = GetUnderlyingMonthMode()
 
-    If UNDERLYING_MONTH_MODE = "Quarter End" Then
+    If underlyingMode = "Quarter End" Then
         underlyingMonth = GetQuarterEndMonth(Month(maturityDate))
         ' If maturity is in Dec (Q1) and quarter end is March, it's next year
         If Month(maturityDate) = 12 And underlyingMonth = 3 Then
@@ -458,12 +462,36 @@ Function GetOptionMonthCodeMethod() As String
 End Function
 
 ' ============================================
+' GET UNDERLYING MONTH MODE FROM CONFIG
+' ============================================
+
+Function GetUnderlyingMonthMode() As String
+    ' Returns the underlying-future month rule from Config:
+    '   "Same Month"    - underlying matches the option's month (default)
+    '   "Quarter End"   - underlying is the next quarterly future (Mar/Jun/Sep/Dec)
+    '                     Use this for instruments like 10Y UST options whose
+    '                     underlying is always the next end-of-quarter future.
+    '   "Next 2 Month"  - underlying is two months ahead of the option month
+    ' Falls back to UNDERLYING_MONTH_MODE_DEFAULT when the named range is missing.
+    Dim mode As String
+    On Error Resume Next
+    mode = Trim(CStr(ThisWorkbook.Sheets(SHEET_CONFIG).Range(UNDERLYING_MONTH_MODE_RANGE).Value))
+    On Error GoTo 0
+
+    If mode = "" Then
+        GetUnderlyingMonthMode = UNDERLYING_MONTH_MODE_DEFAULT
+    Else
+        GetUnderlyingMonthMode = mode
+    End If
+End Function
+
+' ============================================
 ' GET QUARTER END MONTH
 ' ============================================
 
 Function GetQuarterEndMonth(maturityMonth As Integer) As Integer
     ' Returns the quarter end month (3, 6, 9, or 12) for the given month
-    ' Used when UNDERLYING_MONTH_MODE = "Quarter End"
+    ' Used when underlyingMonthMode (Config) = "Quarter End"
     ' Q1: Dec, Jan, Feb -> March | Q2: Mar, Apr, May -> June
     ' Q3: Jun, Jul, Aug -> Sep   | Q4: Sep, Oct, Nov -> December
     Select Case maturityMonth

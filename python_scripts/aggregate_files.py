@@ -61,6 +61,13 @@ CSV_COLUMNS = [
 # Key columns for duplicate detection
 KEY_COLUMNS = ["Spot_Date", "Ticker", "Maturity", "Strike", "Type"]
 
+# Date columns that may contain legacy Excel date serials (e.g. '46234') from
+# the old VBA bug. fix_excel_date_serials() detects and converts them.
+EXCEL_DATE_COLUMNS = ["Spot_Date", "Maturity"]
+EXCEL_SERIAL_MIN = 25569   # 1970-01-01
+EXCEL_SERIAL_MAX = 73050   # 2099-12-31
+EXCEL_DATE_ORIGIN = pd.Timestamp("1899-12-30")  # accounts for 1900 leap-year bug
+
 
 def parse_override(override_str: str) -> tuple[str, str]:
     """Parse a single override string like 'column=value'."""
@@ -132,6 +139,28 @@ def apply_overrides(df: pd.DataFrame, overrides: dict) -> pd.DataFrame:
             print(f"  Warning: Column '{col}' not found in data, adding it")
             df[col] = value
 
+    return df
+
+
+def fix_excel_date_serials(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Detect Excel date serials (e.g. '46234') in date columns and rewrite
+    them as 'YYYY-MM-DD HH:MM:SS' strings. Already-formatted dates and
+    non-date values pass through unchanged.
+
+    Legacy bug fix: an older VBA version saved date columns as Excel serial
+    numbers instead of formatted strings. This function repairs those CSVs
+    on the fly so the aggregated output is correct."""
+    for col in columns:
+        if col not in df.columns:
+            continue
+        numeric = pd.to_numeric(df[col], errors="coerce")
+        is_serial = numeric.between(EXCEL_SERIAL_MIN, EXCEL_SERIAL_MAX)
+        n = int(is_serial.sum())
+        if n == 0:
+            continue
+        dates = EXCEL_DATE_ORIGIN + pd.to_timedelta(numeric[is_serial], unit="D")
+        df.loc[is_serial, col] = dates.dt.strftime("%Y-%m-%d %H:%M:%S").values
+        print(f"  Fixed {n:,} Excel date serials in {col}")
     return df
 
 
@@ -322,6 +351,10 @@ Examples:
     if df.empty:
         print("No data to aggregate")
         sys.exit(1)
+
+    # Repair legacy Excel date serials (e.g. '46234') from old VBA output
+    print("\nFixing Excel date serials (if any)...")
+    df = fix_excel_date_serials(df, EXCEL_DATE_COLUMNS)
 
     # Load overrides
     overrides = {}
