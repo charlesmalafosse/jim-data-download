@@ -188,35 +188,145 @@ End Sub
 ' ============================================
 
 Function BuildCompleteRICList() As Collection
+    ' Generate RICs in (strike asc, maturity asc, PUT-then-CALL) order so a
+    ' top-to-bottom scroll of RIC_List shows the lowest strike first, the
+    ' oldest maturity within each strike, and PUT/CALL of the same
+    ' (strike, maturity) adjacent.
     Dim ricList As New Collection
     Dim maturities As Collection
     Dim putStrikes As Collection
     Dim callStrikes As Collection
-    Dim maturity As Variant
-    Dim strike As Variant
     Dim ricInfo As Object  ' Dictionary
-    
+
     Set maturities = GetMaturityDates()
     Set putStrikes = GetStrikeRange("PUT")
     Set callStrikes = GetStrikeRange("CALL")
-    
-    ' Generate PUT RICs
-    For Each maturity In maturities
-        For Each strike In putStrikes
-            Set ricInfo = CreateRICInfo(CDate(maturity), CDbl(strike), "PUT")
-            ricList.Add ricInfo
-        Next strike
-    Next maturity
-    
-    ' Generate CALL RICs
-    For Each maturity In maturities
-        For Each strike In callStrikes
-            Set ricInfo = CreateRICInfo(CDate(maturity), CDbl(strike), "CALL")
-            ricList.Add ricInfo
-        Next strike
-    Next maturity
-    
+
+    ' Sorted unique union of all strikes (for the outer loop)
+    Dim allStrikes() As Double
+    Dim strikeCount As Long
+    strikeCount = BuildStrikeUnion(putStrikes, callStrikes, allStrikes)
+
+    ' Sorted maturities (oldest first) for the inner loop
+    Dim matDates() As Date
+    Dim matCount As Long
+    matCount = MaturitiesAsSortedArray(maturities, matDates)
+
+    If strikeCount = 0 Or matCount = 0 Then
+        Set BuildCompleteRICList = ricList
+        Exit Function
+    End If
+
+    ' Membership dictionaries — O(1) check whether a strike exists on each side
+    Dim putDict As Object, callDict As Object
+    Set putDict = CreateObject("Scripting.Dictionary")
+    Set callDict = CreateObject("Scripting.Dictionary")
+
+    Dim s As Variant
+    For Each s In putStrikes
+        putDict(CStr(CDbl(s))) = True
+    Next s
+    For Each s In callStrikes
+        callDict(CStr(CDbl(s))) = True
+    Next s
+
+    ' Iterate strike asc -> maturity asc -> PUT then CALL
+    Dim i As Long, j As Long
+    Dim strikeKey As String
+    For i = 0 To strikeCount - 1
+        strikeKey = CStr(allStrikes(i))
+        For j = 0 To matCount - 1
+            If putDict.Exists(strikeKey) Then
+                Set ricInfo = CreateRICInfo(matDates(j), allStrikes(i), "PUT")
+                ricList.Add ricInfo
+            End If
+            If callDict.Exists(strikeKey) Then
+                Set ricInfo = CreateRICInfo(matDates(j), allStrikes(i), "CALL")
+                ricList.Add ricInfo
+            End If
+        Next j
+    Next i
+
     Set BuildCompleteRICList = ricList
+End Function
+
+Private Function BuildStrikeUnion(putStrikes As Collection, callStrikes As Collection, _
+                                  ByRef result() As Double) As Long
+    ' Union of put + call strikes, deduped, ascending. Returns count.
+    Dim dict As Object
+    Set dict = CreateObject("Scripting.Dictionary")
+
+    Dim s As Variant
+    For Each s In putStrikes
+        dict(CDbl(s)) = True
+    Next s
+    For Each s In callStrikes
+        dict(CDbl(s)) = True
+    Next s
+
+    Dim count As Long
+    count = dict.count
+    If count = 0 Then
+        ReDim result(0 To 0)
+        BuildStrikeUnion = 0
+        Exit Function
+    End If
+
+    ReDim result(0 To count - 1)
+    Dim k As Variant, idx As Long
+    idx = 0
+    For Each k In dict.Keys
+        result(idx) = CDbl(k)
+        idx = idx + 1
+    Next k
+
+    ' Insertion sort (small N)
+    Dim i As Long, j As Long, tmp As Double
+    For i = 1 To count - 1
+        tmp = result(i)
+        j = i - 1
+        Do While j >= 0
+            If result(j) <= tmp Then Exit Do
+            result(j + 1) = result(j)
+            j = j - 1
+        Loop
+        result(j + 1) = tmp
+    Next i
+
+    BuildStrikeUnion = count
+End Function
+
+Private Function MaturitiesAsSortedArray(maturities As Collection, _
+                                         ByRef result() As Date) As Long
+    ' Copy maturities to a 0-based array sorted ascending. Returns count.
+    Dim count As Long
+    count = maturities.count
+    If count = 0 Then
+        ReDim result(0 To 0)
+        MaturitiesAsSortedArray = 0
+        Exit Function
+    End If
+
+    ReDim result(0 To count - 1)
+    Dim i As Long
+    For i = 1 To count
+        result(i - 1) = CDate(maturities(i))
+    Next i
+
+    ' Insertion sort
+    Dim j As Long, tmpDate As Date
+    For i = 1 To count - 1
+        tmpDate = result(i)
+        j = i - 1
+        Do While j >= 0
+            If result(j) <= tmpDate Then Exit Do
+            result(j + 1) = result(j)
+            j = j - 1
+        Loop
+        result(j + 1) = tmpDate
+    Next i
+
+    MaturitiesAsSortedArray = count
 End Function
 
 ' ============================================

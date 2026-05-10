@@ -2955,10 +2955,18 @@ End Sub
 ' Bulk-add expired suffix over a maturity range
 ' ============================================
 
+' Sheet name and cell layout used by the picker. Shared by the entry sub
+' and the OK/Cancel button callbacks below.
+Private Const EXPIRED_PICKER_SHEET As String = "_ExpiredSuffixPicker"
+Private Const EXPIRED_PICKER_START_CELL As String = "B4"
+Private Const EXPIRED_PICKER_END_CELL As String = "B5"
+Private Const EXPIRED_PICKER_LIST_FIRST_ROW As Long = 20
+
 Public Sub AddExpiredSuffixForMaturityRange()
-    ' Append ^MMYY expired suffix to all RICs in RIC_List whose Maturity falls
-    ' within a user-selected [start, end] range. RICs that already have a
-    ' suffix are left untouched.
+    ' Build a picker sheet with two dropdowns and OK/Cancel buttons, then
+    ' return. The buttons drive the rest of the flow (ExpiredSuffixPicker_OK
+    ' / ExpiredSuffixPicker_Cancel) so the user can interact with the
+    ' dropdowns freely — no modal MsgBox blocking the worksheet.
     Dim wsRIC As Worksheet
     Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
 
@@ -2970,13 +2978,118 @@ Public Sub AddExpiredSuffixForMaturityRange()
         Exit Sub
     End If
 
-    Dim listText As String
-    listText = BuildMaturityListText(sortedDates, n)
+    BuildExpiredSuffixPickerSheet sortedDates, n
+End Sub
+
+Private Sub BuildExpiredSuffixPickerSheet(sortedDates() As Date, n As Long)
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(EXPIRED_PICKER_SHEET)
+    On Error GoTo 0
+
+    If ws Is Nothing Then
+        Set ws = ThisWorkbook.Worksheets.Add
+        ws.Name = EXPIRED_PICKER_SHEET
+    End If
+
+    ws.Visible = xlSheetVisible
+    ws.Cells.Clear
+    On Error Resume Next
+    ws.Cells.Validation.Delete
+    On Error GoTo 0
+
+    ' Remove any leftover buttons / shapes from a previous run
+    Dim shp As Shape
+    For Each shp In ws.Shapes
+        shp.Delete
+    Next shp
+
+    ' Write the source list down column D (any length, no DV string-limit issue)
+    Dim i As Long
+    For i = 0 To n - 1
+        ws.Cells(EXPIRED_PICKER_LIST_FIRST_ROW + i, "D").Value = _
+            Format(sortedDates(i), "yyyy-mm-dd")
+    Next i
+    Dim listRange As String
+    listRange = "=$D$" & EXPIRED_PICKER_LIST_FIRST_ROW & _
+                ":$D$" & (EXPIRED_PICKER_LIST_FIRST_ROW + n - 1)
+
+    ' Header / instructions
+    ws.Range("A1").Value = "Add Expired Suffix - pick maturity range"
+    ws.Range("A1").Font.Bold = True
+    ws.Range("A1").Font.Size = 14
+    ws.Range("A2").Value = "Pick start and end from the dropdowns, then click OK below."
+
+    ws.Range("A4").Value = "Start maturity:"
+    ws.Range("A5").Value = "End maturity:"
+    ws.Range("A4:A5").Font.Bold = True
+
+    ' Default to first / last so user can just hit OK for the full range
+    ws.Range(EXPIRED_PICKER_START_CELL).Value = Format(sortedDates(0), "yyyy-mm-dd")
+    ws.Range(EXPIRED_PICKER_END_CELL).Value = Format(sortedDates(n - 1), "yyyy-mm-dd")
+
+    With ws.Range(EXPIRED_PICKER_START_CELL).Validation
+        .Add Type:=xlValidateList, Formula1:=listRange
+        .InCellDropdown = True
+    End With
+    With ws.Range(EXPIRED_PICKER_END_CELL).Validation
+        .Add Type:=xlValidateList, Formula1:=listRange
+        .InCellDropdown = True
+    End With
+
+    ws.Columns("A:B").AutoFit
+    ws.Columns("D:D").Hidden = True
+
+    ' OK / Cancel buttons (Forms-style — OnAction routes to public macros)
+    Dim btnTop As Double, btnLeft As Double, btnWidth As Double, btnHeight As Double
+    btnLeft = ws.Range("B7").Left
+    btnTop = ws.Range("B7").Top
+    btnWidth = 80
+    btnHeight = 26
+
+    Dim okBtn As Shape, cancelBtn As Shape
+    Set okBtn = ws.Shapes.AddFormControl(xlButtonControl, btnLeft, btnTop, btnWidth, btnHeight)
+    okBtn.Name = "btnExpiredOK"
+    okBtn.TextFrame.Characters.Text = "OK"
+    okBtn.OnAction = "ExpiredSuffixPicker_OK"
+
+    Set cancelBtn = ws.Shapes.AddFormControl(xlButtonControl, _
+                                             btnLeft + btnWidth + 10, btnTop, _
+                                             btnWidth, btnHeight)
+    cancelBtn.Name = "btnExpiredCancel"
+    cancelBtn.TextFrame.Characters.Text = "Cancel"
+    cancelBtn.OnAction = "ExpiredSuffixPicker_Cancel"
+
+    ws.Activate
+    ws.Range(EXPIRED_PICKER_START_CELL).Select
+End Sub
+
+Public Sub ExpiredSuffixPicker_OK()
+    ' Triggered by the OK button on the picker sheet. Reads the selected
+    ' dates, applies the expired suffix, hides the picker, and reports.
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(EXPIRED_PICKER_SHEET)
+    On Error GoTo 0
+    If ws Is Nothing Then Exit Sub
+
+    Dim startStr As String, endStr As String
+    startStr = Trim(CStr(ws.Range(EXPIRED_PICKER_START_CELL).Value))
+    endStr = Trim(CStr(ws.Range(EXPIRED_PICKER_END_CELL).Value))
+
+    If startStr = "" Or endStr = "" Then
+        MsgBox "Start or end maturity not selected.", vbExclamation
+        Exit Sub
+    End If
+    If Not IsDate(startStr) Or Not IsDate(endStr) Then
+        MsgBox "Could not parse selected maturities ('" & startStr & "', '" & endStr & "').", _
+               vbExclamation
+        Exit Sub
+    End If
 
     Dim startDate As Date, endDate As Date
-    If Not PromptForMaturity("start", listText, sortedDates, n, startDate) Then Exit Sub
-    If Not PromptForMaturity("end", listText, sortedDates, n, endDate) Then Exit Sub
-
+    startDate = CDate(startStr)
+    endDate = CDate(endStr)
     If endDate < startDate Then
         Dim tmpDate As Date
         tmpDate = startDate
@@ -2984,12 +3097,36 @@ Public Sub AddExpiredSuffixForMaturityRange()
         endDate = tmpDate
     End If
 
+    Dim wsRIC As Worksheet
+    Set wsRIC = ThisWorkbook.Worksheets(SHEET_RIC_LIST)
+
     Dim updated As Long
     updated = ApplyExpiredSuffixToRange(wsRIC, startDate, endDate)
+
+    ' Return to RIC_List and hide the picker
+    On Error Resume Next
+    wsRIC.Activate
+    ws.Visible = xlSheetHidden
+    On Error GoTo 0
 
     MsgBox "Expired suffix added to " & updated & " RIC(s) " & _
            "between " & Format(startDate, "yyyy-mm-dd") & " and " & _
            Format(endDate, "yyyy-mm-dd") & ".", vbInformation
+End Sub
+
+Public Sub ExpiredSuffixPicker_Cancel()
+    ' Triggered by the Cancel button on the picker sheet. Hides it and
+    ' returns the user to RIC_List without applying anything.
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(EXPIRED_PICKER_SHEET)
+    On Error GoTo 0
+    If ws Is Nothing Then Exit Sub
+
+    On Error Resume Next
+    ThisWorkbook.Worksheets(SHEET_RIC_LIST).Activate
+    ws.Visible = xlSheetHidden
+    On Error GoTo 0
 End Sub
 
 Private Function CollectUniqueMaturities(wsRIC As Worksheet, ByRef sortedDates() As Date) As Long
@@ -3043,54 +3180,6 @@ Private Function CollectUniqueMaturities(wsRIC As Worksheet, ByRef sortedDates()
     Next a
 
     CollectUniqueMaturities = count
-End Function
-
-Private Function BuildMaturityListText(sortedDates() As Date, n As Long) As String
-    Dim s As String, i As Long
-    For i = 0 To n - 1
-        s = s & (i + 1) & ") " & Format(sortedDates(i), "yyyy-mm-dd") & vbNewLine
-    Next i
-    BuildMaturityListText = s
-End Function
-
-Private Function PromptForMaturity(label As String, listText As String, _
-                                   sortedDates() As Date, n As Long, _
-                                   ByRef result As Date) As Boolean
-    Dim raw As Variant
-    Dim prompt As String
-    prompt = "Pick " & label & " maturity (enter number 1-" & n & " or a date):" & _
-            vbNewLine & vbNewLine & listText
-    raw = Application.InputBox(prompt:=prompt, Title:="Add Expired Suffix - " & label, Type:=2)
-    If VarType(raw) = vbBoolean Then
-        PromptForMaturity = False
-        Exit Function
-    End If
-
-    Dim s As String
-    s = Trim(CStr(raw))
-    If s = "" Then
-        PromptForMaturity = False
-        Exit Function
-    End If
-
-    If IsNumeric(s) Then
-        Dim idx As Long
-        idx = CLng(s)
-        If idx >= 1 And idx <= n Then
-            result = sortedDates(idx - 1)
-            PromptForMaturity = True
-            Exit Function
-        End If
-    End If
-
-    If IsDate(s) Then
-        result = CDate(s)
-        PromptForMaturity = True
-        Exit Function
-    End If
-
-    MsgBox "Could not parse '" & s & "' as an index or a date.", vbExclamation
-    PromptForMaturity = False
 End Function
 
 Private Function ApplyExpiredSuffixToRange(wsRIC As Worksheet, _
