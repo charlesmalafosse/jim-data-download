@@ -49,60 +49,96 @@ Public Const CHAIN_STATE_PROCESSING_OPTIONS As Long = 4
 ' MAIN RIC GENERATION FUNCTION
 ' ============================================
 Sub GenerateAllRICs()
-    ' Main function to generate all RICs and display in new sheet
-    Dim ricList As Collection
-    Dim outputSheet As Worksheet
-    Dim ricDict As Object  ' Dictionary instead of custom type
-    Dim i As Long
-    Dim lastRow As Long
+    ' Generate all RICs using the flat-step strike range (Config!steps).
+    If Not ValidateBloombergConfig() Then Exit Sub
+    WriteRICListToSheet BuildCompleteRICList()
+End Sub
+
+Public Sub GenerateAllRICsMoneyness()
+    ' Generate all RICs using moneyness-band variable-step strikes.
+    ' Strikes come from Config!moneynessBands anchored to Config!spotMin /
+    ' spotMax instead of the flat Config!steps range.
+    If Not ValidateBloombergConfig() Then Exit Sub
+
+    Dim strikes As Collection
+    Set strikes = GetMoneynessStrikeRange()
+    If strikes Is Nothing Then Exit Sub  ' invalid config - message already shown
+
+    If strikes.count = 0 Then
+        MsgBox "Moneyness generator produced no strikes - check spot/band config.", _
+               vbExclamation, "RIC Generation"
+        Exit Sub
+    End If
+
+    ' Puts and calls share the same strike grid (call/put of same strike adjacent)
+    WriteRICListToSheet BuildCompleteRICList(strikes, strikes)
+End Sub
+
+Private Function ValidateBloombergConfig() As Boolean
+    ' Validate the Bloomberg-conversion named ranges in Config. Shows a
+    ' message and returns False on the first problem; True if all present.
     Dim methodRICBB As String
     Dim rootUnderlyingBB As String
     Dim rootUnderlyingRIC As String
-    Dim underlyingRIC As String
 
-    ' Read Bloomberg conversion config
-    methodRICBB = ""
-    rootUnderlyingBB = ""
-    rootUnderlyingRIC = ""
     On Error Resume Next
     methodRICBB = Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("methodRICBB").Value)
     rootUnderlyingBB = Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("rootUnderlyingBB").Value)
     rootUnderlyingRIC = Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("rootUnderlyingRIC").Value)
     On Error GoTo 0
 
-    ' Validate Bloomberg config
     If UCase(methodRICBB) <> "FUTURE" Then
         MsgBox "Invalid or missing 'methodRICBB' in Config sheet!" & vbNewLine & _
                "Current value: '" & methodRICBB & "'" & vbNewLine & _
                "Supported methods: 'Future'", _
                vbCritical, "Configuration Error"
-        Exit Sub
+        ValidateBloombergConfig = False
+        Exit Function
     End If
 
     If rootUnderlyingBB = "" Then
         MsgBox "Missing 'rootUnderlyingBB' named range in Config sheet!" & vbNewLine & _
                "Please set the Bloomberg root ticker for the underlying.", _
                vbCritical, "Configuration Error"
-        Exit Sub
+        ValidateBloombergConfig = False
+        Exit Function
     End If
 
     If rootUnderlyingRIC = "" Then
         MsgBox "Missing 'rootUnderlyingRIC' named range in Config sheet!" & vbNewLine & _
                "Please set the LSEG RIC root for the underlying (e.g., 'FGBM').", _
                vbCritical, "Configuration Error"
-        Exit Sub
+        ValidateBloombergConfig = False
+        Exit Function
     End If
 
-    ' Generate all RICs
-    Set ricList = BuildCompleteRICList()
-    
+    ValidateBloombergConfig = True
+End Function
+
+Private Sub WriteRICListToSheet(ricList As Collection)
+    ' Write a built RIC list to the RIC_List sheet: headers, the cols A-I
+    ' output loop (underlying RIC, Bloomberg ticker, expiry suffix), and
+    ' formatting. Shared by GenerateAllRICs and GenerateAllRICsMoneyness.
+    Dim outputSheet As Worksheet
+    Dim ricDict As Object
+    Dim i As Long
+    Dim lastRow As Long
+    Dim rootUnderlyingBB As String
+    Dim rootUnderlyingRIC As String
+    Dim underlyingRIC As String
+
+    ' Bloomberg-conversion roots (already validated non-empty by caller)
+    On Error Resume Next
+    rootUnderlyingBB = Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("rootUnderlyingBB").Value)
+    rootUnderlyingRIC = Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("rootUnderlyingRIC").Value)
+    On Error GoTo 0
+
     ' Check if sheet exists, create if it doesn't
     On Error Resume Next
     Set outputSheet = ThisWorkbook.Sheets(SHEET_RIC_LIST)
     On Error GoTo 0
-    
+
     If outputSheet Is Nothing Then
-        ' Create new sheet if it doesn't exist
         Set outputSheet = ThisWorkbook.Sheets.Add
         outputSheet.Name = SHEET_RIC_LIST
     Else
@@ -127,7 +163,7 @@ Sub GenerateAllRICs()
         .Range("A1:I1").Font.Bold = True
         .Range("A1:I1").Interior.Color = RGB(200, 200, 200)
     End With
-    
+
     ' Output all RICs
     i = 2
     Dim ric As Variant
@@ -184,14 +220,120 @@ Sub GenerateAllRICs()
 End Sub
 
 ' ============================================
+' MONEYNESS-BAND STRIKE GENERATOR
+' ============================================
+
+Function GetMoneynessStrikeRange() As Collection
+    ' Build a strike list with variable step per moneyness band.
+    ' Reads Config named ranges:
+    '   spotMin, spotMax  - expected spot low / high over the period
+    '   moneynessBands    - 3-col range: lower moneyness, upper moneyness, step
+    ' Lower-bound strike = spotMin*(1+lowerMoneyness);
+    ' upper-bound strike = spotMax*(1+upperMoneyness).
+    ' Returns Nothing (after a MsgBox) on invalid config.
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets(SHEET_CONFIG)
+
+    Dim spotMin As Double, spotMax As Double
+    Dim bandsRng As Range
+    On Error Resume Next
+    spotMin = ws.Range("spotMin").Value
+    spotMax = ws.Range("spotMax").Value
+    Set bandsRng = ws.Range("moneynessBands")
+    On Error GoTo 0
+
+    If spotMin <= 0 Or spotMax <= 0 Or spotMax <= spotMin Then
+        MsgBox "Invalid 'spotMin' / 'spotMax' in Config sheet!" & vbNewLine & _
+               "Both must be positive and spotMax must be greater than spotMin.", _
+               vbCritical, "Configuration Error"
+        Set GetMoneynessStrikeRange = Nothing
+        Exit Function
+    End If
+
+    If bandsRng Is Nothing Then
+        MsgBox "Missing 'moneynessBands' named range in Config sheet!" & vbNewLine & _
+               "Expected a 3-column range: lower moneyness, upper moneyness, step.", _
+               vbCritical, "Configuration Error"
+        Set GetMoneynessStrikeRange = Nothing
+        Exit Function
+    End If
+
+    ' Collect strikes into a dictionary keyed by rounded value (dedup overlaps)
+    Dim dict As Object
+    Set dict = CreateObject("Scripting.Dictionary")
+
+    Dim r As Long
+    Dim lowerM As Variant, upperM As Variant, stepV As Variant
+    Dim rawLo As Double, rawHi As Double, stepSize As Double
+    Dim startK As Double, k As Double
+    Dim bandCount As Long
+    bandCount = 0
+
+    For r = 1 To bandsRng.Rows.count
+        lowerM = bandsRng.Cells(r, 1).Value
+        upperM = bandsRng.Cells(r, 2).Value
+        stepV = bandsRng.Cells(r, 3).Value
+
+        ' Stop at the first blank row
+        If IsEmpty(lowerM) And IsEmpty(upperM) And IsEmpty(stepV) Then Exit For
+
+        ' Skip rows that aren't fully specified / valid
+        If Not (IsNumeric(lowerM) And IsNumeric(upperM) And IsNumeric(stepV)) Then GoTo NextBand
+        If CDbl(stepV) <= 0 Then GoTo NextBand
+        If CDbl(upperM) <= CDbl(lowerM) Then GoTo NextBand
+
+        stepSize = CDbl(stepV)
+        rawLo = spotMin * (1 + CDbl(lowerM))
+        rawHi = spotMax * (1 + CDbl(upperM))
+
+        ' First grid point >= rawLo, snapped to the step grid
+        startK = Int(rawLo / stepSize) * stepSize
+        If startK < rawLo Then startK = startK + stepSize
+
+        Dim n As Long
+        n = 0
+        Do
+            k = Round(startK + n * stepSize, 6)
+            If k > rawHi Then Exit Do
+            If k > 0 Then dict(CStr(k)) = k
+            n = n + 1
+        Loop
+
+        bandCount = bandCount + 1
+NextBand:
+    Next r
+
+    If bandCount = 0 Then
+        MsgBox "No valid rows found in 'moneynessBands'." & vbNewLine & _
+               "Each row needs: lower moneyness, upper moneyness, step (>0).", _
+               vbCritical, "Configuration Error"
+        Set GetMoneynessStrikeRange = Nothing
+        Exit Function
+    End If
+
+    ' Return as a Collection (BuildStrikeUnion sorts/dedups downstream anyway)
+    Dim result As New Collection
+    Dim key As Variant
+    For Each key In dict.Keys
+        result.Add dict(key)
+    Next key
+
+    Set GetMoneynessStrikeRange = result
+End Function
+
+' ============================================
 ' BUILD COMPLETE RIC LIST
 ' ============================================
 
-Function BuildCompleteRICList() As Collection
-    ' Generate RICs in (strike asc, maturity asc, PUT-then-CALL) order so a
-    ' top-to-bottom scroll of RIC_List shows the lowest strike first, the
-    ' oldest maturity within each strike, and PUT/CALL of the same
-    ' (strike, maturity) adjacent.
+Function BuildCompleteRICList(Optional ByVal putStrikesIn As Collection, _
+                              Optional ByVal callStrikesIn As Collection) As Collection
+    ' Generate RICs in (maturity asc, strike asc, PUT-then-CALL) order so a
+    ' top-to-bottom scroll of RIC_List shows the earliest maturity first,
+    ' the lowest strike within each maturity, and PUT/CALL of the same
+    ' (maturity, strike) adjacent.
+    ' putStrikesIn / callStrikesIn: optional pre-built strike collections
+    ' (used by the moneyness generator). When omitted, the flat-step
+    ' Config strike ranges are used via GetStrikeRange.
     Dim ricList As New Collection
     Dim maturities As Collection
     Dim putStrikes As Collection
@@ -199,8 +341,18 @@ Function BuildCompleteRICList() As Collection
     Dim ricInfo As Object  ' Dictionary
 
     Set maturities = GetMaturityDates()
-    Set putStrikes = GetStrikeRange("PUT")
-    Set callStrikes = GetStrikeRange("CALL")
+
+    If putStrikesIn Is Nothing Then
+        Set putStrikes = GetStrikeRange("PUT")
+    Else
+        Set putStrikes = putStrikesIn
+    End If
+
+    If callStrikesIn Is Nothing Then
+        Set callStrikes = GetStrikeRange("CALL")
+    Else
+        Set callStrikes = callStrikesIn
+    End If
 
     ' Sorted unique union of all strikes (for the outer loop)
     Dim allStrikes() As Double
@@ -230,12 +382,12 @@ Function BuildCompleteRICList() As Collection
         callDict(CStr(CDbl(s))) = True
     Next s
 
-    ' Iterate strike asc -> maturity asc -> PUT then CALL
+    ' Iterate maturity asc -> strike asc -> PUT then CALL
     Dim i As Long, j As Long
     Dim strikeKey As String
-    For i = 0 To strikeCount - 1
-        strikeKey = CStr(allStrikes(i))
-        For j = 0 To matCount - 1
+    For j = 0 To matCount - 1
+        For i = 0 To strikeCount - 1
+            strikeKey = CStr(allStrikes(i))
             If putDict.Exists(strikeKey) Then
                 Set ricInfo = CreateRICInfo(matDates(j), allStrikes(i), "PUT")
                 ricList.Add ricInfo
@@ -244,8 +396,8 @@ Function BuildCompleteRICList() As Collection
                 Set ricInfo = CreateRICInfo(matDates(j), allStrikes(i), "CALL")
                 ricList.Add ricInfo
             End If
-        Next j
-    Next i
+        Next i
+    Next j
 
     Set BuildCompleteRICList = ricList
 End Function
@@ -497,19 +649,13 @@ Function FormatStrikeForRIC(strike As Double) As String
 End Function
 
 Function FormatStrikeForWeeklyRIC(strike As Double) As String
-    ' Weekly strike: remove decimal, no trailing zeros
-    ' 100.5 -> "1005", 6000 -> "6000", 100.00 -> "100"
-    Dim strikeStr As String
-
-    If strike = Int(strike) Then
-        ' Whole number - use as-is
-        strikeStr = CStr(CLng(strike))
-    Else
-        ' Has decimals - multiply by 10 and convert
-        strikeStr = CStr(CLng(strike * 10))
-    End If
-
-    FormatStrikeForWeeklyRIC = strikeStr
+    ' Format strike for a weekly option RIC using the configurable
+    ' Config!strikeMultiplier (same as monthly via FormatStrikeForRIC).
+    ' Examples with multiplier=10:  100 -> "1000", 100.5 -> "1005"
+    ' Examples with multiplier=100: 100 -> "10000", 100.5 -> "10050"
+    Dim multiplier As Double
+    multiplier = GetStrikeMultiplier()
+    FormatStrikeForWeeklyRIC = CStr(CLng(strike * multiplier))
 End Function
 
 ' ============================================
@@ -850,8 +996,19 @@ Function BuildWeeklyOptionBloombergTicker(underlyingBloomTicker As String, optTy
         strikeStr = Format(strike, "0.0##")
     End If
 
+    ' Resolve week number into the root. If the configured root contains a
+    ' '#' placeholder, substitute it (handles mid-root digits like "E#D" ->
+    ' "E1D"). Otherwise append the week number after the root (backward
+    ' compatible: "EW" -> "EW1").
+    Dim rootResolved As String
+    If InStr(rootBB, "#") > 0 Then
+        rootResolved = Replace(rootBB, "#", CStr(weekNum))
+    Else
+        rootResolved = rootBB & CStr(weekNum)
+    End If
+
     ' Build weekly option Bloomberg ticker: "OE2Z25C 100 Comdty"
-    BuildWeeklyOptionBloombergTicker = rootBB & weekNum & monthYear & CallPut & " " & strikeStr & " Comdty"
+    BuildWeeklyOptionBloombergTicker = rootResolved & monthYear & CallPut & " " & strikeStr & " Comdty"
 End Function
 
 Function RICWeeklyOptionToBloomberg(ric As String, weekNum As Integer, _

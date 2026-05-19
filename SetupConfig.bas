@@ -1,4 +1,3 @@
-Attribute VB_Name = "SetupConfig"
 ' ============================================
 ' EXCEL WORKBOOK SETUP - RUN THIS ONCE
 ' This will create all sheets with proper formatting

@@ -1906,25 +1906,29 @@ Sub BuildAndAppendBatchRows(ws As Worksheet, startRow As Long, maxRows As Long)
 End Sub
 
 ' Reset the in-memory batch buffer at the start of every batch.
+' NOTE: g_BatchRows is stored as (col, row) — columns dim 1, rows dim 2 —
+' because `ReDim Preserve` in VBA can only resize the LAST dimension, so
+' the growable side (row capacity) has to be the rightmost subscript.
 Sub ResetBatchBuffer()
-    ReDim g_BatchRows(1 To BATCH_INITIAL_CAPACITY, 1 To BATCH_COL_COUNT)
+    ReDim g_BatchRows(1 To BATCH_COL_COUNT, 1 To BATCH_INITIAL_CAPACITY)
     g_BatchRowCount = 0
 End Sub
 
-' Append a remapped block to the in-memory batch buffer, growing capacity
-' (doubling) as needed via ReDim Preserve. srcData is 1-based, 29 cols.
+' Append a remapped block to the in-memory batch buffer, growing the row
+' capacity (doubling) as needed via ReDim Preserve. srcData is 1-based,
+' (row, col); g_BatchRows is (col, row) — see note on ResetBatchBuffer.
 Sub AppendRowsToBatch(srcData As Variant, srcRowCount As Long)
     If srcRowCount <= 0 Then Exit Sub
 
-    ' Determine current capacity (UBound errors if array was never ReDim'd)
+    ' Determine current row capacity (dim 2). UBound errors if never ReDim'd.
     Dim currentCapacity As Long
     currentCapacity = 0
     On Error Resume Next
-    currentCapacity = UBound(g_BatchRows, 1)
+    currentCapacity = UBound(g_BatchRows, 2)
     On Error GoTo 0
 
     If currentCapacity = 0 Then
-        ReDim g_BatchRows(1 To BATCH_INITIAL_CAPACITY, 1 To BATCH_COL_COUNT)
+        ReDim g_BatchRows(1 To BATCH_COL_COUNT, 1 To BATCH_INITIAL_CAPACITY)
         currentCapacity = BATCH_INITIAL_CAPACITY
     End If
 
@@ -1932,14 +1936,14 @@ Sub AppendRowsToBatch(srcData As Variant, srcRowCount As Long)
     Do While g_BatchRowCount + srcRowCount > currentCapacity
         currentCapacity = currentCapacity * 2
     Loop
-    If currentCapacity > UBound(g_BatchRows, 1) Then
-        ReDim Preserve g_BatchRows(1 To currentCapacity, 1 To BATCH_COL_COUNT)
+    If currentCapacity > UBound(g_BatchRows, 2) Then
+        ReDim Preserve g_BatchRows(1 To BATCH_COL_COUNT, 1 To currentCapacity)
     End If
 
     Dim i As Long, c As Long
     For i = 1 To srcRowCount
         For c = 1 To BATCH_COL_COUNT
-            g_BatchRows(g_BatchRowCount + i, c) = srcData(i, c)
+            g_BatchRows(c, g_BatchRowCount + i) = srcData(i, c)
         Next c
     Next i
     g_BatchRowCount = g_BatchRowCount + srcRowCount
@@ -1993,13 +1997,14 @@ Sub WriteBatchToCSV(Optional batchNumber As Long = 0)
     End If
     csvPath = ThisWorkbook.Path & "\" & fileName
 
-    ' Slice g_BatchRows down to actual row count before writing
+    ' Slice g_BatchRows down to actual row count before writing.
+    ' WriteArrayToCSV expects (row, col); g_BatchRows is (col, row) — transpose.
     Dim sliced() As Variant
     ReDim sliced(1 To g_BatchRowCount, 1 To BATCH_COL_COUNT)
     Dim r As Long, c As Long
     For r = 1 To g_BatchRowCount
         For c = 1 To BATCH_COL_COUNT
-            sliced(r, c) = g_BatchRows(r, c)
+            sliced(r, c) = g_BatchRows(c, r)
         Next c
     Next r
 
