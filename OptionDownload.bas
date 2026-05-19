@@ -3530,7 +3530,17 @@ Function GetBloombergTicker(underlyingRIC As String, Optional ricRowRef As Long 
         If Not wsRICList Is Nothing Then
             bloomTicker = Trim(CStr(wsRICList.Cells(ricRowRef, 8).Value))  ' Column H = Bloom_Ticker
             If bloomTicker <> "" Then
-                GetBloombergTicker = bloomTicker
+                ' Force the yellow-key suffix to match Config!rootUnderlyingBB,
+                ' so a stale RIC_List col H (generated before rootUnderlyingBB
+                ' changed) still yields the right Reference.
+                Dim t As String, sp As Long, lw As String
+                t = RTrim(bloomTicker)
+                sp = InStrRev(t, " ")
+                If sp > 0 Then
+                    lw = UCase(Mid(t, sp + 1))
+                    If lw = "COMDTY" Or lw = "INDEX" Then t = RTrim(Left(t, sp - 1))
+                End If
+                GetBloombergTicker = t & GetUnderlyingBBGSuffix()
                 Exit Function
             End If
         End If

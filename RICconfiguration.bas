@@ -779,7 +779,7 @@ Function BuildBloombergTicker(optionType As String, strike As Double, maturityDa
     BuildBloombergTicker = rootBB & " " & Left(optionType, 1) & " " & strike & " " & Format(maturityDate, "mm/dd/yyyy")
 End Function
 
-Function RICToBloomberg(ric As String, BBGRoot As String) As String
+Function RICToBloomberg(ByVal ric As String, ByVal BBGRoot As String) As String
     '-----------------------------------------------------------
     ' Converts a Reuters RIC futures ticker to Bloomberg format
     ' Inputs:
@@ -824,6 +824,24 @@ Function RICToBloomberg(ric As String, BBGRoot As String) As String
     cleanRIC = Trim(UCase(ric))
     BBGRoot = Trim(UCase(BBGRoot))
 
+    ' Yellow-key suffix: default " Comdty". If the root (rootUnderlyingBB)
+    ' ends with "Comdty" or "Index", strip it off and use it as the suffix.
+    Dim bbgSuffix As String
+    bbgSuffix = " Comdty"
+    Dim rootSp As Long
+    rootSp = InStrRev(BBGRoot, " ")
+    If rootSp > 0 Then
+        Dim rootLastWord As String
+        rootLastWord = Mid(BBGRoot, rootSp + 1)
+        If rootLastWord = "COMDTY" Then
+            bbgSuffix = " Comdty"
+            BBGRoot = RTrim(Left(BBGRoot, rootSp - 1))
+        ElseIf rootLastWord = "INDEX" Then
+            bbgSuffix = " Index"
+            BBGRoot = RTrim(Left(BBGRoot, rootSp - 1))
+        End If
+    End If
+
     ' Strip expiration suffix (e.g., ^2) if present
     CaratPos = InStr(cleanRIC, "^")
     If CaratPos > 0 Then
@@ -863,7 +881,7 @@ Function RICToBloomberg(ric As String, BBGRoot As String) As String
     End If
 
     ' Build Bloomberg ticker
-    RICToBloomberg = BBGRoot & monthCode & YearPart & " Comdty"
+    RICToBloomberg = BBGRoot & monthCode & YearPart & bbgSuffix
     Exit Function
 
 ErrorHandler:
@@ -893,6 +911,24 @@ Function GetWeekNumberFromDate(maturityDate As Date) As Integer
     Else
         GetWeekNumberFromDate = 5
     End If
+End Function
+
+Function GetUnderlyingBBGSuffix() As String
+    ' Yellow-key suffix for underlying Bloomberg tickers, from Config!
+    ' rootUnderlyingBB. " Index" if rootUnderlyingBB ends with "Index",
+    ' otherwise the default " Comdty".
+    Dim rub As String, sp As Long
+    On Error Resume Next
+    rub = UCase(Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("rootUnderlyingBB").Value))
+    On Error GoTo 0
+    sp = InStrRev(rub, " ")
+    If sp > 0 Then
+        If Mid(rub, sp + 1) = "INDEX" Then
+            GetUnderlyingBBGSuffix = " Index"
+            Exit Function
+        End If
+    End If
+    GetUnderlyingBBGSuffix = " Comdty"
 End Function
 
 Function BuildOptionBloombergTicker(underlyingBloomTicker As String, optType As String, strike As Double) As String
@@ -932,8 +968,9 @@ Function BuildOptionBloombergTicker(underlyingBloomTicker As String, optType As 
         strikeStr = Format(strike, "0.0##")
     End If
 
-    ' Build option Bloomberg ticker: "OEZ25C 70 Comdty"
-    BuildOptionBloombergTicker = baseTickerPart & CallPut & " " & strikeStr & " Comdty"
+    ' Build option Bloomberg ticker: "OEZ25C 70 Comdty" / "...Index"
+    ' Yellow-key suffix follows Config!rootUnderlyingBB.
+    BuildOptionBloombergTicker = baseTickerPart & CallPut & " " & strikeStr & GetUnderlyingBBGSuffix()
 End Function
 
 Function BuildWeeklyOptionBloombergTicker(underlyingBloomTicker As String, optType As String, strike As Double, weekNum As Integer) As String
@@ -945,7 +982,21 @@ Function BuildWeeklyOptionBloombergTicker(underlyingBloomTicker As String, optTy
     '   strike                - Strike price (e.g., 100.5)
     '   weekNum               - Week number (1-5)
     ' Output:
-    '   Weekly option Bloomberg ticker (e.g., "OE2Z25 C100.50")
+    '   Weekly option Bloomberg ticker, " Comdty" suffix appended.
+    '
+    ' Template mode: if rootBB (Config) contains a "(...)" token, rootBB is
+    ' treated as a template and these placeholders are substituted
+    ' (case-insensitive); any literal characters are kept verbatim:
+    '   (Week Code)   -> week number 1-5
+    '   (Month Code)  -> month letter  (from the underlying Bloomberg ticker)
+    '   (Year Code)   -> year digits   (from the underlying Bloomberg ticker)
+    '   (Year 1digit) -> last digit of the year
+    '   (Option Code) -> "C" / "P"
+    '   (Strike)      -> formatted strike
+    '   e.g. rootBB = "IMDW_(Month Code)(Year Code)(Option Code)(Week Code)(Strike)"
+    ' Yellow-key suffix: " Comdty" is appended by default. If the template
+    ' itself ends with "Comdty" or "Index", that wins and nothing is added.
+    ' Legacy mode: if rootBB has no token, the old fixed layout is used.
     '-----------------------------------------------------------
     Dim basePart As String
     Dim rootBB As String
@@ -968,6 +1019,17 @@ Function BuildWeeklyOptionBloombergTicker(underlyingBloomTicker As String, optTy
     rootBB = Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("rootBB").Value)
     rootUnderlyingBB = Trim(ThisWorkbook.Sheets(SHEET_CONFIG).Range("rootUnderlyingBB").Value)
     On Error GoTo 0
+
+    ' Strip any " Comdty" / " Index" yellow-key suffix from rootUnderlyingBB
+    ' so only the bare root is used for the month/year split below.
+    Dim ruSp As Long, ruLast As String
+    ruSp = InStrRev(rootUnderlyingBB, " ")
+    If ruSp > 0 Then
+        ruLast = UCase(Mid(rootUnderlyingBB, ruSp + 1))
+        If ruLast = "COMDTY" Or ruLast = "INDEX" Then
+            rootUnderlyingBB = RTrim(Left(rootUnderlyingBB, ruSp - 1))
+        End If
+    End If
 
     ' Split basePart into root and month+year using UNDERLYING root
     ' e.g., "OEZ25" with rootUnderlyingBB="OE" -> monthYear="Z25"
@@ -996,19 +1058,38 @@ Function BuildWeeklyOptionBloombergTicker(underlyingBloomTicker As String, optTy
         strikeStr = Format(strike, "0.0##")
     End If
 
-    ' Resolve week number into the root. If the configured root contains a
-    ' '#' placeholder, substitute it (handles mid-root digits like "E#D" ->
-    ' "E1D"). Otherwise append the week number after the root (backward
-    ' compatible: "EW" -> "EW1").
-    Dim rootResolved As String
-    If InStr(rootBB, "#") > 0 Then
-        rootResolved = Replace(rootBB, "#", CStr(weekNum))
-    Else
-        rootResolved = rootBB & CStr(weekNum)
-    End If
+    ' Split monthYear (e.g. "Z25") into month letter + year digits
+    Dim monthCode As String, yearCode As String
+    monthCode = Left(monthYear, 1)
+    yearCode = Mid(monthYear, 2)
 
-    ' Build weekly option Bloomberg ticker: "OE2Z25C 100 Comdty"
-    BuildWeeklyOptionBloombergTicker = rootResolved & monthYear & CallPut & " " & strikeStr & " Comdty"
+    If InStr(rootBB, "(") > 0 Then
+        ' Template mode: substitute placeholder tokens, keep literals verbatim
+        Dim tpl As String
+        tpl = rootBB
+        tpl = Replace(tpl, "(Week Code)", CStr(weekNum), 1, -1, vbTextCompare)
+        tpl = Replace(tpl, "(Month Code)", monthCode, 1, -1, vbTextCompare)
+        tpl = Replace(tpl, "(Year Code)", yearCode, 1, -1, vbTextCompare)
+        tpl = Replace(tpl, "(Year 1digit)", Right(yearCode, 1), 1, -1, vbTextCompare)
+        tpl = Replace(tpl, "(Option Code)", CallPut, 1, -1, vbTextCompare)
+        tpl = Replace(tpl, "(Strike)", strikeStr, 1, -1, vbTextCompare)
+        tpl = RTrim(tpl)
+
+        ' If the template already ends with a yellow-key suffix (Comdty or
+        ' Index), use it as-is; otherwise append the default " Comdty".
+        Dim lastWord As String, sp As Long
+        sp = InStrRev(tpl, " ")
+        If sp > 0 Then lastWord = Mid(tpl, sp + 1) Else lastWord = tpl
+        If UCase(lastWord) = "COMDTY" Or UCase(lastWord) = "INDEX" Then
+            BuildWeeklyOptionBloombergTicker = tpl
+        Else
+            BuildWeeklyOptionBloombergTicker = tpl & " Comdty"
+        End If
+    Else
+        ' Legacy mode: old fixed layout "OE2Z25C 100 Comdty" / "...Index"
+        BuildWeeklyOptionBloombergTicker = rootBB & CStr(weekNum) & monthYear & _
+                                           CallPut & " " & strikeStr & GetUnderlyingBBGSuffix()
+    End If
 End Function
 
 Function RICWeeklyOptionToBloomberg(ric As String, weekNum As Integer, _

@@ -13,6 +13,8 @@ Usage:
     python aggregate_and_validate.py all --input-dir . --output combined.csv
 """
 
+from __future__ import annotations  # allow `str | None` etc. on Python 3.7+
+
 import argparse
 import glob
 import json

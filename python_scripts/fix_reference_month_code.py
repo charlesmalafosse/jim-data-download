@@ -25,6 +25,8 @@ Usage:
     python fix_reference_month_code.py <input_csv> --dry-run  # preview only
 """
 
+from __future__ import annotations  # allow `str | None` etc. on Python 3.7+
+
 import argparse
 import os
 import re

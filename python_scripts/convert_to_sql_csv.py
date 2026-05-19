@@ -16,6 +16,8 @@ pipeline, but the output is a CSV file instead of a MySQL table.
 Configure the inputs in the __main__ block at the bottom of the file.
 """
 
+from __future__ import annotations  # allow `str | None` etc. on Python 3.7+
+
 import csv
 import logging
 import sys
